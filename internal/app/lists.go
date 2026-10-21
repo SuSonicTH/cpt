@@ -45,7 +45,8 @@ func (a *App) Refresh(ctx context.Context, names []string, force bool) ([]Refres
 			a.Log.Warn("could not sync shell snippets after refresh", "error", err)
 		}
 	}()
-	if len(names) == 0 {
+	explicit := len(names) > 0
+	if !explicit {
 		for name := range a.State.Lists {
 			names = append(names, name)
 		}
@@ -55,14 +56,20 @@ func (a *App) Refresh(ctx context.Context, names []string, force bool) ([]Refres
 	for _, name := range names {
 		meta, ok := a.State.Lists[name]
 		if !ok {
-			return nil, fmt.Errorf("unknown list %q", name)
+			return results, fmt.Errorf("unknown list %q", name)
+		}
+		if meta == nil {
+			return results, fmt.Errorf("list %q has no metadata", name)
 		}
 		if meta.Readonly {
-			return nil, fmt.Errorf("list %q is read-only", name)
+			if explicit {
+				return results, fmt.Errorf("list %q is read-only", name)
+			}
+			continue
 		}
 		changed, count, err := a.refreshListChanged(ctx, name, meta, force)
 		if err != nil {
-			return nil, fmt.Errorf("refresh %s: %w", name, err)
+			return results, fmt.Errorf("refresh %s: %w", name, err)
 		}
 		results = append(results, RefreshResult{Name: name, Origin: meta.Origin, Changed: changed, Packages: count})
 	}
@@ -190,8 +197,14 @@ func (a *App) RemoveList(ctx context.Context, name string) (int, error) {
 	if !ok {
 		return 0, fmt.Errorf("unknown list %q", name)
 	}
+	if meta == nil {
+		return 0, fmt.Errorf("list %q has no metadata", name)
+	}
 	if meta.Builtin {
 		return 0, fmt.Errorf("the builtin list %q cannot be removed", name)
+	}
+	if meta.Readonly {
+		return 0, fmt.Errorf("list %q is read-only", name)
 	}
 	installed := 0
 	for _, p := range a.State.Packages {
@@ -220,6 +233,7 @@ type ListInfo struct {
 	Builtin   bool      `json:"builtin"`
 	Readonly  bool      `json:"readonly"`
 	Stale     bool      `json:"stale"`
+	Conflicts int       `json:"conflicts,omitempty"`
 }
 
 // Lists describes every configured list.
@@ -229,9 +243,20 @@ func (a *App) Lists() []ListInfo {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	conflicts := map[string]int{}
+	if cat, err := a.Catalog(); err == nil {
+		for _, lists := range cat.Conflicts() {
+			for _, name := range lists {
+				conflicts[name]++
+			}
+		}
+	}
 	out := make([]ListInfo, 0, len(names))
 	for _, name := range names {
 		meta := a.State.Lists[name]
+		if meta == nil {
+			continue
+		}
 		stale := meta.FetchedAt.IsZero() || time.Since(meta.FetchedAt) > a.Cfg.ListTTL()
 		out = append(out, ListInfo{
 			Name:      name,
@@ -241,6 +266,7 @@ func (a *App) Lists() []ListInfo {
 			Builtin:   meta.Builtin,
 			Readonly:  meta.Readonly,
 			Stale:     stale,
+			Conflicts: conflicts[name],
 		})
 	}
 	return out

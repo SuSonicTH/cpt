@@ -14,8 +14,8 @@ cpt install fzf ripgrep jq
 
 ## Status
 
-This is milestone **v0.1**: the core engine, the CLI, the master package list
-and shell integration are complete.
+This is milestone **v0.2**: the core engine, the CLI, the master package list,
+shell integration, and the interactive TUI are complete.
 
 | Area | State |
 |---|---|
@@ -26,7 +26,7 @@ and shell integration are complete.
 | Install, update, remove, pin, verify, doctor | done |
 | `cptinit` for bash/zsh/PowerShell, `init --install` | done |
 | Shell packages (inline and URL snippets) with approval | done |
-| Interactive TUI | planned (M3) |
+| Interactive TUI (packages, lists, log, progress, multi-select) | done |
 | Self-extracting bundles for remote machines | planned (M4) |
 | Windows shell packages | deferred |
 
@@ -66,6 +66,26 @@ cpt init bash --install        # ... or add a marker block to ~/.bashrc
 ```
 
 `cpt pin jq@1.7.1` freezes an installed package; `cpt unpin jq` releases it.
+
+## Interactive TUI
+
+Running `cpt` with no arguments in a terminal opens the TUI:
+
+```
+cpt
+```
+
+Tabs cover packages, lists and the log. Installs and updates run in the
+background with per-package spinners and an aggregate progress bar. Use
+`space` to multi-select packages, `/` to search, `i` to install, `u` to update,
+`d` to remove, `X` to force-remove modified files, `p` to pin, `enter` for a
+full-screen detail view, and `?` for the complete key map. `esc` cancels a
+running operation or a background version check.
+
+The TUI never writes outside the terminal: progress events come from the same
+engine the CLI uses, and the log tab tails `~/.cpt/logs/cpt.log`. If cpt is run
+without a terminal (for example from a script or CI) or with `--no-tui`, it
+prints a short explanation and the command help instead.
 
 `--offline` blocks all network access: list refreshes are skipped, adding lists
 fails, and installing anything not already present fails. Re-running `install`

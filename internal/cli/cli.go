@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 
+	"golang.org/x/term"
+
 	"github.com/SuSonicTH/cpt/internal/app"
 	"github.com/SuSonicTH/cpt/internal/cerr"
 	"github.com/SuSonicTH/cpt/internal/out"
@@ -23,6 +25,7 @@ type globals struct {
 	Quiet   bool
 	NoColor bool
 	Offline bool
+	NoTUI   bool
 	Help    bool
 	Version bool
 }
@@ -47,11 +50,11 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "cpt: %v\n\n%s", err, usage)
 		return int(cerr.Usage)
 	}
-	if g.Help || len(rest) == 0 {
+	if g.Help {
 		fmt.Fprint(stdout, usage)
 		return 0
 	}
-	if g.Version || rest[0] == "version" {
+	if g.Version || (len(rest) > 0 && rest[0] == "version") {
 		if g.JSON {
 			p := out.New(stdout, stderr, true, false, true)
 			return exitOn(p.JSONData(map[string]string{
@@ -63,7 +66,23 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, version.Full())
 		return 0
 	}
-	if rest[0] == "help" {
+	if len(rest) > 0 && rest[0] == "help" {
+		fmt.Fprint(stdout, usage)
+		return 0
+	}
+	if len(rest) == 0 {
+		if g.JSON {
+			fmt.Fprint(stdout, usage)
+			return 0
+		}
+		if !g.NoTUI && isTTY(stdout) && isTTY(os.Stdin) {
+			return runTUI(ctx, g, stdout, stderr)
+		}
+		if g.NoTUI {
+			fmt.Fprintln(stderr, noTUIMessage)
+		} else {
+			fmt.Fprintln(stderr, nonTTYMessage)
+		}
 		fmt.Fprint(stdout, usage)
 		return 0
 	}
@@ -183,6 +202,8 @@ func parseGlobals(args []string) (globals, []string, error) {
 			g.NoColor = true
 		case arg == "--offline":
 			g.Offline = true
+		case arg == "--no-tui":
+			g.NoTUI = true
 		case arg == "--help" || arg == "-h":
 			g.Help = true
 		case arg == "--version" || arg == "-V":
@@ -202,9 +223,5 @@ func isTTY(w io.Writer) bool {
 	if !ok {
 		return false
 	}
-	info, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return info.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(int(f.Fd()))
 }

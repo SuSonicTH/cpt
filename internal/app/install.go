@@ -18,6 +18,7 @@ import (
 	"github.com/SuSonicTH/cpt/internal/install"
 	"github.com/SuSonicTH/cpt/internal/list"
 	"github.com/SuSonicTH/cpt/internal/platform"
+	"github.com/SuSonicTH/cpt/internal/progress"
 	"github.com/SuSonicTH/cpt/internal/resolve"
 	"github.com/SuSonicTH/cpt/internal/shellinit"
 	"github.com/SuSonicTH/cpt/internal/state"
@@ -106,16 +107,20 @@ func (a *App) Update(ctx context.Context, names []string, force, dry bool) ([]Re
 	for _, name := range names {
 		p, ok := a.State.Packages[name]
 		if !ok {
-			results = append(results, Result{Name: name, Action: "failed", Err: fmt.Errorf("%s is not installed", name), ErrText: fmt.Sprintf("%s is not installed", name)})
+			err := fmt.Errorf("%s is not installed", name)
+			results = append(results, Result{Name: name, Action: "failed", Err: err, ErrText: err.Error()})
+			a.emit(progress.Event{Kind: progress.KindFailed, Package: name, Message: err.Error()})
 			continue
 		}
 		if p.Pinned != "" && !force {
 			results = append(results, Result{Name: name, Version: p.Version, Action: "skipped (pinned)"})
+			a.emit(progress.Event{Kind: progress.KindDone, Package: name, Version: p.Version, Action: "skipped (pinned)"})
 			continue
 		}
 		entry, err := cat.Lookup(name)
 		if err != nil {
 			results = append(results, Result{Name: name, Action: "failed", Err: err, ErrText: err.Error()})
+			a.emit(progress.Event{Kind: progress.KindFailed, Package: name, Message: err.Error()})
 			continue
 		}
 		pin := p.Pinned
@@ -177,10 +182,12 @@ func (a *App) Remove(ctx context.Context, names []string, force bool) ([]Result,
 		if p == nil {
 			continue
 		}
+		a.emit(progress.Event{Kind: progress.KindRemoving, Package: name, Version: p.Version})
 		for _, d := range plans[i] {
 			if d.exists {
 				if err := os.Remove(d.path); err != nil && !os.IsNotExist(err) {
 					// Keep the failed bin tracked so a retry can remove it.
+					a.emit(progress.Event{Kind: progress.KindFailed, Package: name, Message: err.Error()})
 					return results, fmt.Errorf("remove %s: %w", d.path, err)
 				}
 			}
@@ -189,6 +196,7 @@ func (a *App) Remove(ctx context.Context, names []string, force bool) ([]Result,
 		}
 		a.State.Remove(name)
 		results = append(results, Result{Name: name, Version: p.Version, Action: "removed"})
+		a.emit(progress.Event{Kind: progress.KindDone, Package: name, Version: p.Version, Action: "removed"})
 	}
 	return results, nil
 }
@@ -237,6 +245,11 @@ func (a *App) installRequests(ctx context.Context, reqs []request, opt InstallOp
 	results := make([]Result, len(reqs))
 	for i := range reqs {
 		results[i] = Result{Name: reqs[i].entry.Pkg.Name, List: reqs[i].entry.List}
+		a.emit(progress.Event{
+			Kind:    progress.KindQueued,
+			Package: reqs[i].entry.Pkg.Name,
+			Version: reqs[i].version,
+		})
 	}
 	if len(reqs) == 0 {
 		// Update may have nothing to install (all pinned or their lists are
@@ -281,12 +294,14 @@ func (a *App) installRequests(ctx context.Context, reqs []request, opt InstallOp
 			r.Action = "failed"
 			r.Err = errors.New("internal error: missing result")
 			r.ErrText = r.Err.Error()
+			a.emit(progress.Event{Kind: progress.KindFailed, Package: r.Name, Message: r.ErrText})
 			continue
 		}
 		if st.err != nil {
 			r.Action = "failed"
 			r.Err = st.err
 			r.ErrText = st.err.Error()
+			a.emit(progress.Event{Kind: progress.KindFailed, Package: r.Name, Message: r.ErrText})
 			continue
 		}
 		res := st.res
@@ -299,6 +314,7 @@ func (a *App) installRequests(ctx context.Context, reqs []request, opt InstallOp
 		}
 		if st.action != "" {
 			r.Action = st.action
+			a.emit(progress.Event{Kind: progress.KindDone, Package: r.Name, Version: r.Version, Action: r.Action})
 			continue
 		}
 		if opt.DryRun {
@@ -307,13 +323,16 @@ func (a *App) installRequests(ctx context.Context, reqs []request, opt InstallOp
 			} else {
 				r.Action = "would update"
 			}
+			a.emit(progress.Event{Kind: progress.KindDone, Package: r.Name, Version: r.Version, Action: r.Action})
 			continue
 		}
+		a.emit(progress.Event{Kind: progress.KindInstalling, Package: res.Name, Version: res.Version})
 		installed, err := manager.Place(res.Name, st.bins)
 		if err != nil {
 			r.Action = "failed"
 			r.Err = err
 			r.ErrText = err.Error()
+			a.emit(progress.Event{Kind: progress.KindFailed, Package: r.Name, Message: r.ErrText})
 			continue
 		}
 		r.Bins = sortedKeys(installed)
@@ -343,6 +362,7 @@ func (a *App) installRequests(ctx context.Context, reqs []request, opt InstallOp
 			Origin:         "install",
 			InstalledAt:    time.Now().UTC(),
 		}
+		a.emit(progress.Event{Kind: progress.KindDone, Package: r.Name, Version: r.Version, Action: r.Action})
 	}
 	for _, w := range manager.Warnings {
 		a.Out.Warnf("%s", w)
@@ -433,6 +453,7 @@ func (a *App) stage(ctx context.Context, req request, plat platform.Platform, pr
 		resolveOpt.InstalledTag = prev.Tag
 		resolveOpt.InstalledVer = prev.Version
 	}
+	a.emit(progress.Event{Kind: progress.KindResolving, Package: name})
 	res, err := resolve.Package(ctx, a.Prober, req.entry, plat, resolveOpt)
 	if err != nil {
 		return &staged{err: fmt.Errorf("%s: %w", name, err)}
@@ -459,7 +480,24 @@ func (a *App) stage(ctx context.Context, req request, plat platform.Platform, pr
 	}
 	st.dir = dir
 	assetPath := filepath.Join(dir, safeAssetName(res.Asset))
-	down := &fetch.Downloader{Client: a.Client, Attempts: max(1, a.Cfg.HTTP.Retries)}
+	var lastProgress time.Time
+	down := &fetch.Downloader{
+		Client:   a.Client,
+		Attempts: max(1, a.Cfg.HTTP.Retries),
+		Progress: func(label string, done, total int64) {
+			// Bound the event rate: a fast download would otherwise flood the
+			// TUI and starve terminal events.
+			now := time.Now()
+			// Throttle both known- and unknown-length downloads; a known final
+			// chunk is always reported so the UI can reach 100%.
+			if now.Sub(lastProgress) < 100*time.Millisecond && (total <= 0 || done < total) {
+				return
+			}
+			lastProgress = now
+			a.emit(progress.Event{Kind: progress.KindDownloading, Package: label, Done: done, Total: total})
+		},
+	}
+	a.emit(progress.Event{Kind: progress.KindDownloading, Package: res.Name, Version: res.Version})
 	sha, _, err := down.To(ctx, res.URL, assetPath, res.Name)
 	if err != nil && errors.Is(err, httpc.ErrNotFound) && !res.AssetVersioned && !res.Pinned && res.Canonical != "" {
 		// Version-less assets are only reachable through the latest path, and
@@ -482,6 +520,7 @@ func (a *App) stage(ctx context.Context, req request, plat platform.Platform, pr
 	}
 	st.sha = sha
 
+	a.emit(progress.Event{Kind: progress.KindVerifying, Package: res.Name, Version: res.Version})
 	status, source, err := a.verify(ctx, res, sha, previous, opt)
 	if err != nil {
 		st.err = err
@@ -489,6 +528,7 @@ func (a *App) stage(ctx context.Context, req request, plat platform.Platform, pr
 	}
 	st.status, st.source = status, source
 
+	a.emit(progress.Event{Kind: progress.KindExtracting, Package: res.Name, Version: res.Version})
 	extractDir := filepath.Join(dir, "x")
 	files, err := archive.Extract(assetPath, res.Format, extractDir)
 	if err != nil {

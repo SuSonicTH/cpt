@@ -31,6 +31,7 @@ Global flags:
   --verbose     Enable debug logging
   --quiet       Suppress informational output
   --no-color    Disable colour output
+  --no-tui      Do not start the interactive UI when no command is given
 
 Package lists are fetched from cpt.json in a repository root, from a raw
 https URL, or from an already downloaded file. The master list ships inside

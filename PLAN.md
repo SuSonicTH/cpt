@@ -6,7 +6,7 @@ GitHub releases) using declarative JSON package lists, installs them into a flat
 `~/.cpt/bin`, and can freeze a chosen set of tools into a single native binary that sets
 up a working `cpt` environment on another machine.
 
-Status: design accepted; M0–M2 implemented (core, CLI, shell integration).
+Status: design accepted; M0–M3 implemented (core, CLI, shell integration, TUI).
 
 ---
 

@@ -19,6 +19,7 @@ import (
 	"github.com/SuSonicTH/cpt/internal/list"
 	"github.com/SuSonicTH/cpt/internal/logx"
 	"github.com/SuSonicTH/cpt/internal/out"
+	"github.com/SuSonicTH/cpt/internal/progress"
 	"github.com/SuSonicTH/cpt/internal/source"
 	"github.com/SuSonicTH/cpt/internal/state"
 )
@@ -35,6 +36,11 @@ type Options struct {
 	Color   bool
 	Stdout  io.Writer
 	Stderr  io.Writer
+	// Interactive hands the console to the TUI: the logger writes only to the
+	// log file and all user-facing text must go through the progress bus.
+	Interactive bool
+	// Events receives structured progress updates. It may be nil.
+	Events *progress.Bus
 }
 
 // App is the shared runtime for every command.
@@ -47,6 +53,7 @@ type App struct {
 	Out     *out.Printer
 	Log     *slog.Logger
 	Offline bool
+	Events  *progress.Bus
 
 	closer func()
 }
@@ -69,7 +76,7 @@ func Open(opts Options) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	logger, closer := logx.New(paths.Logs, logx.Options{Verbose: opts.Verbose, Quiet: opts.Quiet, Level: cfg.Logs.Level})
+	logger, closer := logx.New(paths.Logs, logx.Options{Verbose: opts.Verbose, Quiet: opts.Quiet || opts.Interactive, Level: cfg.Logs.Level})
 
 	stdout := opts.Stdout
 	if stdout == nil {
@@ -87,6 +94,7 @@ func Open(opts Options) (*App, error) {
 		Out:     out.New(stdout, stderr, opts.JSON, opts.Color, opts.Quiet),
 		Log:     logger,
 		Offline: opts.Offline,
+		Events:  opts.Events,
 		closer:  func() { _ = closer.Close() },
 	}
 	a.Prober = &source.Prober{
@@ -117,6 +125,13 @@ func Open(opts Options) (*App, error) {
 func (a *App) Close() {
 	if a.closer != nil {
 		a.closer()
+	}
+}
+
+// emit publishes a progress event when a bus is attached.
+func (a *App) emit(e progress.Event) {
+	if a.Events != nil {
+		a.Events.Publish(e)
 	}
 }
 

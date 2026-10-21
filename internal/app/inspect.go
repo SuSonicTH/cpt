@@ -21,16 +21,23 @@ type ListOptions struct {
 
 // Row is one package line in listings.
 type Row struct {
-	Name        string `json:"name"`
-	List        string `json:"list"`
-	Version     string `json:"version,omitempty"`
-	Latest      string `json:"latest,omitempty"`
-	Status      string `json:"status"`
-	Description string `json:"description,omitempty"`
-	Tags        string `json:"tags,omitempty"`
-	Pinned      bool   `json:"pinned,omitempty"`
-	Conflict    bool   `json:"conflict,omitempty"`
-	Error       string `json:"error,omitempty"`
+	Name           string   `json:"name"`
+	List           string   `json:"list"`
+	Version        string   `json:"version,omitempty"`
+	Latest         string   `json:"latest,omitempty"`
+	Status         string   `json:"status"`
+	Description    string   `json:"description,omitempty"`
+	Tags           string   `json:"tags,omitempty"`
+	Homepage       string   `json:"homepage,omitempty"`
+	License        string   `json:"license,omitempty"`
+	Asset          string   `json:"asset,omitempty"`
+	Checksum       string   `json:"checksum_status,omitempty"`
+	ChecksumSource string   `json:"checksum_source,omitempty"`
+	SHA256         string   `json:"sha256,omitempty"`
+	Bins           []string `json:"bins,omitempty"`
+	Pinned         bool     `json:"pinned,omitempty"`
+	Conflict       bool     `json:"conflict,omitempty"`
+	Error          string   `json:"error,omitempty"`
 }
 
 // Rows builds the package table. With Updates enabled it probes upstream
@@ -45,8 +52,10 @@ func (a *App) Rows(ctx context.Context, opt ListOptions) ([]Row, error) {
 
 	var rows []Row
 	probeTargets := map[string]string{} // name -> list
+	inCatalog := make(map[string]bool, len(cat.Entries()))
 	for _, entry := range cat.Entries() {
 		pkg := entry.Pkg
+		inCatalog[pkg.Name] = true
 		if query != "" && !matchesQuery(pkg.Name, pkg.Description, pkg.Tags, query) {
 			continue
 		}
@@ -62,6 +71,8 @@ func (a *App) Rows(ctx context.Context, opt ListOptions) ([]Row, error) {
 			List:        entry.List,
 			Description: pkg.Description,
 			Tags:        strings.Join(pkg.Tags, ","),
+			Homepage:    pkg.Homepage,
+			License:     pkg.License,
 			Status:      "available",
 		}
 		if len(conflicts[pkg.Name]) > 1 {
@@ -71,6 +82,11 @@ func (a *App) Rows(ctx context.Context, opt ListOptions) ([]Row, error) {
 		if installed != nil {
 			row.Version = installed.Version
 			row.Pinned = installed.Pinned != ""
+			row.Asset = installed.Asset
+			row.Checksum = installed.ChecksumStatus
+			row.ChecksumSource = installed.ChecksumSource
+			row.SHA256 = installed.DownloadSHA256
+			row.Bins = sortedKeys(installed.Bins)
 			if row.Status != "conflict" {
 				row.Status = "installed"
 			}
@@ -81,8 +97,40 @@ func (a *App) Rows(ctx context.Context, opt ListOptions) ([]Row, error) {
 		rows = append(rows, row)
 	}
 
+	// Installed packages whose list was removed stay usable; surface them so
+	// they can still be selected, verified and removed. They have no upstream
+	// entry to probe.
+	if !opt.Available {
+		for name, p := range a.State.Packages {
+			if inCatalog[name] || p == nil {
+				continue
+			}
+			if query != "" && !matchesQuery(name, "", nil, query) {
+				continue
+			}
+			rows = append(rows, Row{
+				Name:           name,
+				List:           p.List,
+				Version:        p.Version,
+				Latest:         "",
+				Status:         "installed",
+				Description:    "installed, but no configured list provides it",
+				Asset:          p.Asset,
+				Checksum:       p.ChecksumStatus,
+				ChecksumSource: p.ChecksumSource,
+				SHA256:         p.DownloadSHA256,
+				Bins:           sortedKeys(p.Bins),
+				Pinned:         p.Pinned != "",
+			})
+		}
+	}
 	if opt.Updates && !a.Offline && len(probeTargets) > 0 {
 		a.probeLatest(ctx, cat, rows, probeTargets)
+		if err := ctx.Err(); err != nil {
+			// A cancelled refresh must not replace good rows with spurious
+			// "context canceled" errors on every package.
+			return nil, err
+		}
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Name != rows[j].Name {
@@ -139,6 +187,9 @@ func (a *App) probeLatest(ctx context.Context, cat *list.Catalog, rows []Row, ta
 			continue
 		}
 		rows[i].Latest = res.version
+		if rows[i].Pinned || rows[i].Status == "conflict" {
+			continue
+		}
 		if rows[i].Version == res.version {
 			rows[i].Status = "installed"
 		} else {
@@ -234,6 +285,13 @@ func (a *App) Detail(ctx context.Context, name string) (*Info, error) {
 		}
 	}
 	return info, nil
+}
+
+// MatchesQuery reports whether a package matches a lowercase free-text query.
+// The CLI uses it directly; the TUI uses it as the fast path before applying
+// its more permissive subsequence match.
+func MatchesQuery(name, description string, tags []string, query string) bool {
+	return matchesQuery(name, description, tags, query)
 }
 
 func matchesQuery(name, description string, tags []string, query string) bool {
