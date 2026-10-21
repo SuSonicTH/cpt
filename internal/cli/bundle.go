@@ -14,6 +14,7 @@ import (
 	"github.com/SuSonicTH/cpt/internal/app"
 	"github.com/SuSonicTH/cpt/internal/bundle"
 	"github.com/SuSonicTH/cpt/internal/cerr"
+	"github.com/SuSonicTH/cpt/internal/install"
 	"github.com/SuSonicTH/cpt/internal/out"
 )
 
@@ -332,14 +333,18 @@ func bundleModeError(stdout, stderr io.Writer, jsonMode bool, err error) int {
 	return int(cerr.KindOf(err))
 }
 
-// runStagedSelf runs a clean cpt.exe.new staged by a Windows bundle install
+// runStagedSelf runs a clean cpt.new.exe staged by a Windows bundle install
 // that could not replace its own running image. The child gets the original
 // arguments and its exit code is propagated, so every normal command works even
 // while the installer image is still on disk.
 func runStagedSelf(self string, args []string, stdout, stderr io.Writer) (int, bool) {
-	pending := self + ".new"
+	pending := install.PendingPath(self)
 	if _, err := os.Stat(pending); err != nil {
-		return 0, false
+		legacy := self + ".new"
+		if _, legacyErr := os.Stat(legacy); legacyErr != nil {
+			return 0, false
+		}
+		pending = legacy
 	}
 	if bundle.IsBundle(pending) {
 		return 0, false

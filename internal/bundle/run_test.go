@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SuSonicTH/cpt/internal/install"
 	"github.com/SuSonicTH/cpt/internal/state"
 )
 
@@ -24,13 +25,13 @@ func runnableBundle(t *testing.T, frozen bool) string {
 	m.Packages = []ManifestPackage{{
 		Name: "tool", List: "core", Version: "1.0.0", Tag: "v1.0.0",
 		Asset: "tool.tar.gz", DownloadSHA256: strings.Repeat("a", 64),
-		Bins: []string{"tool"}, ChecksumStatus: "tofu",
+		Bins: []string{binName("tool")}, ChecksumStatus: "tofu",
 	}}
 	m.Lists = map[string]ManifestList{"core": {SHA256: hashFor(listData), Origin: "https://example.com/core.json"}}
 	return buildTestFile(t, dir, "BASE-EXECUTABLE\n", Payload{
 		Manifest: m,
 		Lists:    map[string][]byte{"core": listData},
-		Bins:     []PayloadBin{{Name: "tool", Path: bin}},
+		Bins:     []PayloadBin{{Name: binName("tool"), Path: bin}},
 	})
 }
 
@@ -46,7 +47,7 @@ func TestRunInstallsAndIsIdempotent(t *testing.T) {
 		t.Fatalf("unexpected result: %+v", res)
 	}
 
-	data, err := os.ReadFile(filepath.Join(dest, "bin", "tool"))
+	data, err := os.ReadFile(filepath.Join(dest, "bin", binName("tool")))
 	if err != nil || string(data) != "#!/bin/sh\necho bundled\n" {
 		t.Fatalf("binary: %v %q", err, data)
 	}
@@ -131,12 +132,12 @@ func TestRunRejectsTargetMismatchBeforeWriting(t *testing.T) {
 	} else {
 		m.Target = "windows/amd64"
 	}
-	m.Packages = []ManifestPackage{{Name: "tool", List: "core", Version: "1", Tag: "v1", Asset: "a", DownloadSHA256: strings.Repeat("b", 64), Bins: []string{"tool"}}}
+	m.Packages = []ManifestPackage{{Name: "tool", List: "core", Version: "1", Tag: "v1", Asset: "a", DownloadSHA256: strings.Repeat("b", 64), Bins: []string{binName("tool")}}}
 	m.Lists = map[string]ManifestList{"core": {SHA256: hashFor(listData)}}
 	foreign := buildTestFile(t, dir, "base", Payload{
 		Manifest: m,
 		Lists:    map[string][]byte{"core": listData},
-		Bins:     []PayloadBin{{Name: "tool", Path: bin}},
+		Bins:     []PayloadBin{{Name: binName("tool"), Path: bin}},
 	})
 	dest := filepath.Join(t.TempDir(), "missing")
 	if _, err := Run(context.Background(), foreign, RunOptions{Dest: dest}); err == nil {
@@ -169,4 +170,54 @@ func cptName() string {
 		return "cpt.exe"
 	}
 	return "cpt"
+}
+
+func binName(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".exe"
+	}
+	return name
+}
+
+func TestSwapPendingSelfPath(t *testing.T) {
+	dir := t.TempDir()
+	for _, legacy := range []bool{false, true} {
+		name := "cpt.exe"
+		if legacy {
+			name = "cpt-legacy.exe"
+		}
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("old"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		pending := install.PendingPath(path)
+		other := path + ".new"
+		if legacy {
+			pending, other = path+".new", install.PendingPath(path)
+		}
+		if err := os.WriteFile(pending, []byte("new"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if !legacy {
+			// A stale legacy candidate must not survive a successful swap.
+			if err := os.WriteFile(other, []byte("stale"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := swapPendingSelfPath(path); err != nil {
+			t.Fatalf("swapPendingSelfPath(legacy=%v): %v", legacy, err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != "new" {
+			t.Fatalf("legacy=%v content = %q, err = %v", legacy, data, err)
+		}
+		if _, err := os.Stat(pending); !os.IsNotExist(err) {
+			t.Fatalf("pending still present: %v", err)
+		}
+		if !legacy {
+			if _, err := os.Stat(other); !os.IsNotExist(err) {
+				t.Fatalf("stale alternate pending survived: %v", err)
+			}
+		}
+	}
 }

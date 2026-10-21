@@ -94,6 +94,20 @@ func TestSelectFallsBackToPrefixedBinary(t *testing.T) {
 	}
 }
 
+func TestSelectPrefersExeOnWindows(t *testing.T) {
+	files := []File{
+		{Rel: "pkg/tool", Mode: 0o755},
+		{Rel: "pkg/tool.exe", Mode: 0o755},
+	}
+	bins, err := Select(files, "/tmp", SelectOptions{Bins: []string{"tool"}, Windows: true})
+	if err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+	if len(bins) != 1 || bins[0].Name != "tool.exe" || bins[0].Path != filepath.Join("/tmp", "pkg", "tool.exe") {
+		t.Fatalf("unexpected bins: %+v", bins)
+	}
+}
+
 func TestSelectRawSingleFile(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "jq-linux-amd64")

@@ -1,4 +1,5 @@
 /cpt
 /dist/
 *.test
+*.test.exe
 coverage.out

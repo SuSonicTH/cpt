@@ -314,13 +314,7 @@ func Select(files []File, dest string, opt SelectOptions) ([]Bin, error) {
 	if len(opt.Bins) > 0 {
 		var out []Bin
 		for _, want := range opt.Bins {
-			found := ""
-			for _, f := range files {
-				if binMatches(filepath.Base(f.Rel), want, opt.Windows) {
-					found = f.Rel
-					break
-				}
-			}
+			found := findBin(files, want, opt.Windows)
 			name := want
 			if found == "" {
 				// Distribution archives often name the binary after the asset,
@@ -351,7 +345,7 @@ func Select(files []File, dest string, opt SelectOptions) ([]Bin, error) {
 			}
 			out = append(out, Bin{Name: name, Path: filepath.Join(dest, found)})
 		}
-		return dedupe(out)
+		return dedupe(out, opt.Windows)
 	}
 
 	prefix := ""
@@ -377,7 +371,7 @@ func Select(files []File, dest string, opt SelectOptions) ([]Bin, error) {
 	for _, f := range candidates {
 		out = append(out, Bin{Name: filepath.Base(f.Rel), Path: filepath.Join(dest, f.Rel)})
 	}
-	return dedupe(out)
+	return dedupe(out, opt.Windows)
 }
 
 // commonPrefix returns "dir/" when every file lives under the same top-level
@@ -401,33 +395,55 @@ func commonPrefix(files []File) string {
 	return first + "/"
 }
 
-func dedupe(bins []Bin) ([]Bin, error) {
+func dedupe(bins []Bin, windows bool) ([]Bin, error) {
 	seen := map[string]string{}
 	var out []Bin
 	for _, b := range bins {
-		if prev, ok := seen[b.Name]; ok {
+		key := b.Name
+		if windows {
+			key = strings.ToLower(b.Name)
+		}
+		if prev, ok := seen[key]; ok {
 			if prev != b.Path {
 				return nil, fmt.Errorf("archive contains two files named %q", b.Name)
 			}
 			continue
 		}
-		seen[b.Name] = b.Path
+		seen[key] = b.Path
 		out = append(out, b)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
 }
 
-func binMatches(base, want string, windows bool) bool {
-	if base == want {
-		return true
-	}
+// findBin locates an explicitly requested binary. On Windows an exact .exe
+// match wins over a bare name, because distributions occasionally ship both a
+// launcher script and its executable.
+func findBin(files []File, want string, windows bool) string {
 	if windows {
-		if strings.EqualFold(base, want) || strings.EqualFold(base, want+".exe") {
-			return true
+		target := want
+		if !strings.EqualFold(filepath.Ext(target), ".exe") {
+			target += ".exe"
+		}
+		for _, f := range files {
+			if strings.EqualFold(filepath.Base(f.Rel), target) {
+				return f.Rel
+			}
 		}
 	}
-	return false
+	for _, f := range files {
+		if filepath.Base(f.Rel) == want {
+			return f.Rel
+		}
+	}
+	if windows {
+		for _, f := range files {
+			if strings.EqualFold(filepath.Base(f.Rel), want) {
+				return f.Rel
+			}
+		}
+	}
+	return ""
 }
 
 func executable(f File, windows bool) bool {

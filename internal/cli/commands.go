@@ -154,7 +154,7 @@ func colorStatus(a *app.App, status string) string {
 	switch status {
 	case "installed", "ok":
 		return a.Out.Symbol("ok", status)
-	case "update", "warn", "up-to-date":
+	case "update", "warn", "up-to-date", "pending":
 		return a.Out.Symbol("warn", status)
 	case "conflict", "failed", "error", "missing", "modified", "fail":
 		return a.Out.Symbol("error", status)
@@ -426,7 +426,8 @@ func cmdVerify(ctx context.Context, a *app.App, args []string) error {
 	}
 	bad := 0
 	for _, r := range results {
-		if r.Status != "ok" {
+		switch r.Status {
+		case "missing", "modified":
 			bad++
 		}
 	}

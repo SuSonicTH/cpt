@@ -72,7 +72,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			printError(g.JSON, stdout, stderr, bundleErr)
 			return cerr.ExitCode(bundleErr)
 		}
-		// A Windows install may have staged a clean cpt.exe.new because the
+		// A Windows install may have staged a clean cpt.new.exe because the
 		// installer image was running. Use it for normal commands instead of
 		// re-entering bundle mode.
 		if !g.Help && !looksLikeBundleInvocation(rest) {

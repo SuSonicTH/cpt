@@ -86,7 +86,6 @@ func TestLockContention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Acquire: %v", err)
 	}
-	defer l1.Release()
 	if _, err := Acquire(path, 150*time.Millisecond); err == nil {
 		t.Fatal("expected second Acquire to time out")
 	}
@@ -97,8 +96,37 @@ func TestLockContention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire after release: %v", err)
 	}
-	l2.Release()
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("lock file still present: %v", err)
+	if err := l2.Release(); err != nil {
+		t.Fatalf("second Release: %v", err)
+	}
+}
+
+func TestStaleLockFileDoesNotBlock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".lock")
+	// Metadata left behind by a crashed process must not matter: the kernel
+	// released its lock when the process exited.
+	if err := os.WriteFile(path, []byte("999999 deadbeef 2020-01-01T00:00:00Z\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := Acquire(path, 0)
+	if err != nil {
+		t.Fatalf("Acquire with a stale lock file: %v", err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+}
+
+func TestReleaseIsIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".lock")
+	lock, err := Acquire(path, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatalf("second Release: %v", err)
 	}
 }

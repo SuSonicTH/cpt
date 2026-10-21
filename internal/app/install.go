@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -154,9 +155,11 @@ func (a *App) Remove(ctx context.Context, names []string, force bool) ([]Result,
 		}
 	}
 	type planned struct {
-		path   string
-		bin    string
-		exists bool
+		path          string
+		pending       string
+		bin           string
+		exists        bool
+		pendingExists bool
 	}
 	plans := make([][]planned, len(names))
 	for i, name := range names {
@@ -170,14 +173,43 @@ func (a *App) Remove(ctx context.Context, names []string, force bool) ([]Result,
 				continue
 			}
 			path := filepath.Join(a.BinDir(), bin)
-			got, err := install.FileSHA256(path)
-			if err != nil && !os.IsNotExist(err) {
-				return nil, fmt.Errorf("hash %s: %w", path, err)
+			got, destErr := install.FileSHA256(path)
+			pendingPath, pendingHash := "", ""
+			var pendingErr error = os.ErrNotExist
+			if runtime.GOOS == "windows" {
+				pendingPath, pendingHash, pendingErr = install.FindPending(path)
+				if pendingErr != nil && !os.IsNotExist(pendingErr) {
+					return nil, fmt.Errorf("%s: %w", path, pendingErr)
+				}
 			}
-			if err == nil && want != "" && got != want && !force {
-				return nil, fmt.Errorf("%s was modified since installation; use --force to remove it", path)
+			// A staged Windows update is the authoritative bytes recorded in
+			// state; the still-running destination may legitimately be older.
+			// A staged file that does not match state is left for doctor/GC and
+			// the destination is checked instead.
+			authoritative := pendingErr == nil && (want == "" || pendingHash == want)
+			checkPath, checkHash, checkErr := path, got, destErr
+			if authoritative {
+				checkPath, checkHash, checkErr = pendingPath, pendingHash, nil
 			}
-			plans[i] = append(plans[i], planned{path: path, bin: bin, exists: err == nil})
+			if checkErr != nil && !os.IsNotExist(checkErr) {
+				return nil, fmt.Errorf("hash %s: %w", checkPath, checkErr)
+			}
+			if checkErr == nil && want != "" && checkHash != want && !force {
+				return nil, fmt.Errorf("%s was modified since installation; use --force to remove it", checkPath)
+			}
+			if destErr != nil && !os.IsNotExist(destErr) {
+				return nil, fmt.Errorf("hash %s: %w", path, destErr)
+			}
+			if pendingErr == nil && !authoritative && !force {
+				return nil, fmt.Errorf("%s has a staged update with a different hash; use --force to remove it", pendingPath)
+			}
+			plans[i] = append(plans[i], planned{
+				path:          path,
+				pending:       pendingPath,
+				bin:           bin,
+				exists:        destErr == nil,
+				pendingExists: pendingErr == nil,
+			})
 		}
 	}
 
@@ -196,6 +228,17 @@ func (a *App) Remove(ctx context.Context, names []string, force bool) ([]Result,
 					return results, fmt.Errorf("remove %s: %w", d.path, err)
 				}
 			}
+			// Remove the staged copy only after the destination is gone: if
+			// the running binary blocks removal, the staged update stays
+			// available for the next attempt.
+			if d.pendingExists {
+				for _, candidate := range install.PendingCandidates(d.path) {
+					if err := os.Remove(candidate); err != nil && !os.IsNotExist(err) {
+						a.emit(progress.Event{Kind: progress.KindFailed, Package: name, Message: err.Error()})
+						return results, fmt.Errorf("remove %s: %w", candidate, err)
+					}
+				}
+			}
 			delete(p.Bins, d.bin)
 			delete(a.State.Provides, d.bin)
 		}
@@ -203,6 +246,7 @@ func (a *App) Remove(ctx context.Context, names []string, force bool) ([]Result,
 		results = append(results, Result{Name: name, Version: p.Version, Action: "removed"})
 		a.emit(progress.Event{Kind: progress.KindDone, Package: name, Version: p.Version, Action: "removed"})
 	}
+	a.runGC()
 	return results, nil
 }
 
@@ -390,6 +434,7 @@ func (a *App) installRequests(ctx context.Context, reqs []request, opt InstallOp
 		if err := a.SyncShell(ctx, approve); err != nil {
 			a.Log.Warn("could not sync shell snippets", "error", err)
 		}
+		a.runGC()
 	}
 	return results, firstResultError(results)
 }
@@ -570,12 +615,23 @@ func (a *App) installedCurrent(p *state.Package) bool {
 	for bin, want := range p.Bins {
 		path := filepath.Join(a.BinDir(), bin)
 		got, err := install.FileSHA256(path)
-		if err != nil {
-			return false
+		if err == nil && (want == "" || got == want) {
+			continue
 		}
-		if want != "" && got != want {
-			return false
+		// On Windows the old binary can stay in place while the verified new
+		// version waits as *.new.exe. Do not re-download the same update.
+		if runtime.GOOS == "windows" {
+			if _, pendingHash, pendingErr := install.FindPending(path); pendingErr == nil &&
+				(want == "" || pendingHash == want) {
+				// The staged file is only useful while the old destination is
+				// still there to be swapped out; a missing destination needs a
+				// real install.
+				if _, statErr := os.Stat(path); statErr == nil {
+					continue
+				}
+			}
 		}
+		return false
 	}
 	return true
 }
@@ -636,12 +692,28 @@ func (a *App) Verify(names []string) ([]VerifyResult, error) {
 		}
 		for bin, want := range p.Bins {
 			path := filepath.Join(a.BinDir(), bin)
+			pendingPath, pendingHash := "", ""
+			var pendingErr error = os.ErrNotExist
+			if runtime.GOOS == "windows" {
+				pendingPath, pendingHash, pendingErr = install.FindPending(path)
+			}
+			if pendingErr == nil && (want == "" || pendingHash == want) {
+				results = append(results, VerifyResult{
+					Package: name, Bin: bin, Status: "pending",
+					Detail: "staged update will activate on the next cpt start: " + filepath.Base(pendingPath),
+				})
+				continue
+			}
 			got, err := install.FileSHA256(path)
 			switch {
 			case err != nil:
 				results = append(results, VerifyResult{Package: name, Bin: bin, Status: "missing", Detail: err.Error()})
 			case want != "" && got != want:
-				results = append(results, VerifyResult{Package: name, Bin: bin, Status: "modified", Detail: got})
+				detail := got
+				if pendingErr == nil {
+					detail += " (staged update " + filepath.Base(pendingPath) + " does not match state)"
+				}
+				results = append(results, VerifyResult{Package: name, Bin: bin, Status: "modified", Detail: detail})
 			default:
 				results = append(results, VerifyResult{Package: name, Bin: bin, Status: "ok"})
 			}
@@ -680,6 +752,11 @@ func (a *App) Doctor() ([]Check, error) {
 	} else {
 		add("bin-dir", "ok", a.BinDir())
 	}
+	if err := checkWritableDirs(a.Paths.Root, a.Paths.Lists, a.BinDir()); err != nil {
+		add("permissions", "fail", err.Error())
+	} else {
+		add("permissions", "ok", "root, lists and bin directories are writable")
+	}
 	if pathListed(a.BinDir()) {
 		add("path", "ok", "bin directory is on PATH")
 	} else {
@@ -687,8 +764,23 @@ func (a *App) Doctor() ([]Check, error) {
 	}
 
 	for name, p := range a.State.Packages {
-		for bin := range p.Bins {
-			if _, err := os.Stat(filepath.Join(a.BinDir(), bin)); err != nil {
+		for bin, want := range p.Bins {
+			dest := filepath.Join(a.BinDir(), bin)
+			if runtime.GOOS == "windows" {
+				pendingPath, pendingHash, pendingErr := install.FindPending(dest)
+				switch {
+				case pendingErr == nil && want != "" && pendingHash != want:
+					add("pending-mismatch", "warn", fmt.Sprintf(
+						"%s has a staged update that does not match state; run cpt install --force %s or remove the package",
+						filepath.Base(pendingPath), name))
+				case pendingErr == nil:
+					add("pending-swap", "warn", fmt.Sprintf(
+						"%s has a staged update; close it and restart cpt to activate the new version", bin))
+				case !os.IsNotExist(pendingErr):
+					add("pending-swap", "warn", fmt.Sprintf("%s: %v", bin, pendingErr))
+				}
+			}
+			if _, err := os.Stat(dest); err != nil {
 				add("missing-binary", "fail", name+" provides "+bin+" but it is gone")
 			}
 		}
@@ -704,7 +796,8 @@ func (a *App) Doctor() ([]Check, error) {
 		add("bin-scan", "warn", err.Error())
 	} else {
 		for _, e := range entries {
-			if e.IsDir() || strings.HasPrefix(e.Name(), ".") || strings.HasSuffix(e.Name(), ".new") {
+			if e.IsDir() || strings.HasPrefix(e.Name(), ".") ||
+				(runtime.GOOS == "windows" && install.IsPendingName(e.Name())) {
 				continue
 			}
 			if _, owned := a.State.Owner(e.Name()); !owned {
@@ -715,6 +808,14 @@ func (a *App) Doctor() ([]Check, error) {
 
 	for _, backup := range install.RecoveryBackups(a.BinDir()) {
 		add("recovery-backup", "warn", backup)
+	}
+	for _, stale := range install.StaleStaging(a.BinDir()) {
+		add("stale-stage", "warn", stale)
+	}
+	if runtime.GOOS == "windows" {
+		for _, orphan := range install.OrphanPending(a.BinDir(), a.State) {
+			add("orphan-stage", "warn", orphan+" no longer belongs to an installed binary; cpt will remove it during GC")
+		}
 	}
 
 	if cat, err := a.Catalog(); err != nil {
@@ -742,7 +843,7 @@ func (a *App) Doctor() ([]Check, error) {
 		case !looksGenerated(data):
 			customInit = true
 			add("shell-init", "warn", path+" was not generated by cpt; leaving it untouched")
-		case string(data) != a.InitScript(fl):
+		case shellinit.DecodeScript(data) != a.InitScript(fl):
 			initProblems = true
 			add("shell-init", "warn", path+" is out of date and will be regenerated")
 		}
@@ -848,6 +949,23 @@ func safeAssetName(asset string) string {
 		return "asset"
 	}
 	return out
+}
+
+// checkWritableDirs proves that cpt can create files where it will need to.
+// Mode bits alone are unreliable on Windows and when running as root.
+func checkWritableDirs(dirs ...string) error {
+	for _, dir := range dirs {
+		f, err := os.CreateTemp(dir, ".cpt-doctor-*")
+		if err != nil {
+			return fmt.Errorf("%s is not writable: %w", dir, err)
+		}
+		name := f.Name()
+		_ = f.Close()
+		if err := os.Remove(name); err != nil {
+			return fmt.Errorf("remove probe file %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 func pathListed(dir string) bool {

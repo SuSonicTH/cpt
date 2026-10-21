@@ -10,6 +10,7 @@ require (
 	github.com/charmbracelet/x/exp/teatest v0.0.0-20261018003744-cb897cb4ed72
 	github.com/klauspost/compress v1.17.11
 	github.com/ulikunitz/xz v0.5.12
+	golang.org/x/sys v0.38.0
 	golang.org/x/term v0.35.0
 )
 
@@ -34,6 +35,5 @@ require (
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
 )

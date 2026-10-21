@@ -11,11 +11,20 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/SuSonicTH/cpt/internal/install"
 	"github.com/SuSonicTH/cpt/internal/platform"
 )
+
+func binaryName(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".exe"
+	}
+	return name
+}
 
 func archiveWith(t *testing.T, name, body string) []byte {
 	t.Helper()
@@ -115,7 +124,7 @@ func TestVerifyJSONReportsFailure(t *testing.T) {
 	if code, _, errb := runCLI(t, "--root", root, "install", "mytool"); code != 0 {
 		t.Fatalf("install failed: %s", errb)
 	}
-	if err := os.WriteFile(filepath.Join(root, "bin", "mytool"), []byte("tampered"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "bin", binaryName("mytool")), []byte("tampered"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	code, out, _ := runCLI(t, "--root", root, "--json", "verify")
@@ -159,6 +168,26 @@ func TestDoctorJSONReportsFailure(t *testing.T) {
 	}
 }
 
+func TestRunStagedSelfPropagatesExitCode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the test script uses a POSIX shebang")
+	}
+	dir := t.TempDir()
+	self := filepath.Join(dir, "cpt")
+	if err := os.WriteFile(self, []byte("bundle image"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pending := install.PendingPath(self)
+	if err := os.WriteFile(pending, []byte("#!/bin/sh\nexit 7\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	code, ok := runStagedSelf(self, nil, &out, &errb)
+	if !ok || code != 7 {
+		t.Fatalf("runStagedSelf = %d, %v (stderr %s)", code, ok, errb.String())
+	}
+}
+
 func TestFlagsAfterPositionalArguments(t *testing.T) {
 	root, _ := urlFixture(t)
 	code, out, errb := runCLI(t, "--root", root, "install", "mytool", "--dry-run")
@@ -168,7 +197,7 @@ func TestFlagsAfterPositionalArguments(t *testing.T) {
 	if !strings.Contains(out, "would install") {
 		t.Fatalf("unexpected output: %s", out)
 	}
-	if _, err := os.Stat(filepath.Join(root, "bin", "mytool")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(root, "bin", binaryName("mytool"))); !os.IsNotExist(err) {
 		t.Fatal("dry run installed the package")
 	}
 }

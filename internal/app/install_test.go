@@ -14,11 +14,21 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 
 	"github.com/SuSonicTH/cpt/internal/state"
 )
+
+// binName is the flat-bin name cpt records on this platform. Windows installs
+// use the .exe suffix even when a test fixture archive uses a bare name.
+func binName(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".exe"
+	}
+	return name
+}
 
 func tarGz(t *testing.T, files map[string]string) []byte {
 	t.Helper()
@@ -97,7 +107,7 @@ func TestInstallURLSourceVerifiedAndTOFU(t *testing.T) {
 		t.Fatalf("unexpected results: %+v", results)
 	}
 
-	bin := filepath.Join(root, "bin", "mytool")
+	bin := filepath.Join(root, "bin", binName("mytool"))
 	body, err := os.ReadFile(bin)
 	if err != nil {
 		t.Fatalf("installed binary: %v", err)
@@ -117,7 +127,7 @@ func TestInstallURLSourceVerifiedAndTOFU(t *testing.T) {
 	if p.ChecksumStatus != "verified" {
 		t.Fatalf("checksum status = %q", p.ChecksumStatus)
 	}
-	if saved.Provides["mytool"] != "mytool" {
+	if saved.Provides[binName("mytool")] != "mytool" {
 		t.Fatalf("provides = %+v", saved.Provides)
 	}
 
@@ -167,7 +177,7 @@ func TestRemoveInstalledPackage(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "bin", "mytool")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(root, "bin", binName("mytool"))); !os.IsNotExist(err) {
 		t.Fatalf("binary still present: %v", err)
 	}
 	saved, _ := state.Load(filepath.Join(root, "state.json"))

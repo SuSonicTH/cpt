@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
+	"strings"
 	"time"
 
 	"github.com/SuSonicTH/cpt/internal/fsutil"
@@ -166,10 +168,50 @@ func (s *State) Save(path string) error {
 	return fsutil.WriteFileAtomic(path, data, 0o600)
 }
 
-// Owner returns the package that provides bin, if any.
+// Owner returns the package that provides bin, if any. Windows paths and
+// binary names are case-insensitive, so a differently-cased record still owns
+// the same file.
 func (s *State) Owner(bin string) (string, bool) {
-	pkg, ok := s.Provides[bin]
-	return pkg, ok
+	if pkg, ok := s.Provides[bin]; ok {
+		return pkg, true
+	}
+	if runtime.GOOS == "windows" {
+		for name, pkg := range s.Provides {
+			if strings.EqualFold(name, bin) {
+				return pkg, true
+			}
+		}
+	}
+	return "", false
+}
+
+// SetOwner records that owner provides bin, replacing any differently-cased
+// entry for the same file on Windows.
+func (s *State) SetOwner(bin, owner string) {
+	if runtime.GOOS == "windows" {
+		for name := range s.Provides {
+			if name != bin && strings.EqualFold(name, bin) {
+				delete(s.Provides, name)
+			}
+		}
+	}
+	s.Provides[bin] = owner
+}
+
+// DeleteBin removes a bin from a package's ownership map, matching case
+// insensitively on Windows.
+func DeleteBin(p *Package, bin string) {
+	if p == nil || p.Bins == nil {
+		return
+	}
+	delete(p.Bins, bin)
+	if runtime.GOOS == "windows" {
+		for name := range p.Bins {
+			if strings.EqualFold(name, bin) {
+				delete(p.Bins, name)
+			}
+		}
+	}
 }
 
 // Remove deletes a package, its binary ownership records and its shell state.
@@ -178,6 +220,13 @@ func (s *State) Remove(name string) {
 		for bin := range p.Bins {
 			if s.Provides[bin] == name {
 				delete(s.Provides, bin)
+			}
+			if runtime.GOOS == "windows" {
+				for provided, owner := range s.Provides {
+					if owner == name && strings.EqualFold(provided, bin) {
+						delete(s.Provides, provided)
+					}
+				}
 			}
 		}
 	}

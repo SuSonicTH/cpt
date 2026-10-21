@@ -14,9 +14,9 @@ cpt install fzf ripgrep jq
 
 ## Status
 
-This is milestone **v0.3**: the core engine, the CLI, the master package list,
-shell integration, the interactive TUI, and self-extracting bundles are
-complete.
+This is milestone **v0.4 (M5)**: the core engine, the CLI, the master package
+list, shell integration, the interactive TUI, self-extracting bundles, and
+Windows/macOS platform support are complete.
 
 | Area | State |
 |---|---|
@@ -29,6 +29,11 @@ complete.
 | Shell packages (inline and URL snippets) with approval | done |
 | Interactive TUI (packages, lists, bundles, log, progress, multi-select) | done |
 | Self-extracting bundles for remote machines (live and frozen) | done |
+| Windows zip/`.exe` installs with `.new.exe` swap on restart | done |
+| PowerShell 5.1 and 7 init, profile editing and UTF-16 rc files | done |
+| Cross-platform state locking (flock / LockFileEx) | done |
+| darwin bundle ad-hoc signing after payload append | done |
+| Garbage collection of staging, probes and old bundle artifacts | done |
 | Windows shell packages | deferred |
 
 See [PLAN.md](PLAN.md) for the full design and roadmap.
@@ -310,12 +315,40 @@ Building for another platform downloads the matching cpt release into
 locally cross-compiled one). See [docs/bundle-format.md](docs/bundle-format.md)
 for the container and payload format.
 
+## Windows and macOS
+
+On Windows, archives are unpacked from zip or tar.gz and installed as `.exe`
+files in the flat bin directory. If a binary is running and Windows refuses to
+replace it, cpt stages the new version as `<name>.new.exe`, records the
+intended hash, and swaps it in on the next cpt start. `cpt verify` reports a
+staged binary as `pending`; `cpt doctor` warns that a restart will complete the
+update. Removing a package also removes its staged copy.
+
+`cpt init pwsh --install` and `cpt init powershell --install` edit the profile
+reported by PowerShell itself, preserving UTF-16 files and Windows line
+endings. The generated `cptinit.ps1` uses only ASCII headers and works in both
+PowerShell 7 and Windows PowerShell 5.1.
+
+State writes are serialized with a real OS file lock (`flock` on Unix,
+`LockFileEx` on Windows), so a crashed process cannot leave a stale lock
+behind. macOS bundles are ad-hoc signed after the payload is appended when
+`codesign` is available; cross-built darwin bundles warn that they must be
+signed on a Mac before distribution.
+
+Every successful install, update or removal performs a small garbage
+collection pass: crash staging, expired version probes, old cross-target cpt
+base binaries and orphaned bundle artifacts are removed. Installed binaries,
+recovery backups, cached snippets and downloaded packages are never touched.
+`cpt doctor` additionally checks that the root, list and bin directories are
+writable.
+
 ## Layout
 
 ```
 ~/.cpt/
 ├── config.json      # optional; defaults are built in
 ├── state.json       # installed packages, hashes, list metadata, snippet approval
+├── .lock            # OS-level lock: one mutating cpt at a time
 ├── bin/             # every installed binary lives here
 ├── lists/           # core.json and any lists you add
 ├── cache/probe/     # cached upstream tags

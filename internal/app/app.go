@@ -112,6 +112,9 @@ func Open(opts Options) (*App, error) {
 	if err := a.loadState(); err != nil {
 		return nil, err
 	}
+	if err := a.ReconcilePending(); err != nil {
+		logger.Warn("could not activate staged binary updates", "error", err)
+	}
 	ctx := opts.Context
 	if ctx == nil {
 		ctx = context.Background()

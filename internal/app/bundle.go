@@ -316,7 +316,13 @@ func (a *App) BuildBundle(ctx context.Context, opt BundleOptions) (BundleBuildRe
 	if target.OS == "darwin" {
 		if runtime.GOOS == "darwin" {
 			if err := codesignBundle(ctx, outPath); err != nil {
-				warnings = append(warnings, "codesign failed: "+err.Error())
+				warnings = append(warnings, "codesign failed: "+err.Error()+
+					"; the unsigned bundle will not run on Apple Silicon")
+			}
+			// Signing rewrites the Mach-O, so prove the appended payload and
+			// footer survived before reporting success.
+			if err := verifyBundleFile(outPath); err != nil {
+				return BundleBuildResult{}, fmt.Errorf("darwin bundle failed verification after signing: %w", err)
 			}
 		} else {
 			warnings = append(warnings, "cross-built darwin bundle is unsigned; run codesign --force --sign - on macOS before distributing it")
@@ -623,7 +629,7 @@ func (a *App) bundleInit(built []*builtPackage) map[string][]byte {
 				Body:    body,
 			})
 		}
-		out[shellinit.ScriptName(fl)] = []byte(shellinit.Render(fl, opt, blocks))
+		out[shellinit.ScriptName(fl)] = shellinit.ScriptBytes(fl, shellinit.Render(fl, opt, blocks))
 	}
 	return out
 }
@@ -720,13 +726,24 @@ func (a *App) bundleBase(ctx context.Context, target platform.Platform, explicit
 func codesignBundle(ctx context.Context, path string) error {
 	exe, err := exec.LookPath("codesign")
 	if err != nil {
-		return nil // no toolchain available; the caller records no warning
+		return fmt.Errorf("codesign is not installed; the bundle remains unsigned")
 	}
 	cmd := exec.CommandContext(ctx, exe, "--force", "--sign", "-", path)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+// verifyBundleFile re-opens a finished bundle and checks the footer, payload
+// hash and CRC. It is used after external tools (codesign) may rewrite the file.
+func verifyBundleFile(path string) error {
+	c, err := bundle.Open(path)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	return c.Verify()
 }
 
 func copyFileMode(src, dest string, mode os.FileMode) error {

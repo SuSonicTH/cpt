@@ -91,10 +91,10 @@ func TestForceOwnershipTransferKeepsSharedBinary(t *testing.T) {
 	if _, err := installOne(t, a, "beta", InstallOptions{Force: true}); err != nil {
 		t.Fatalf("force install beta: %v", err)
 	}
-	if owner := a.State.Provides["tool"]; owner != "beta" {
+	if owner := a.State.Provides[binName("tool")]; owner != "beta" {
 		t.Fatalf("owner = %q, want beta", owner)
 	}
-	if _, ok := a.State.Packages["alpha"].Bins["tool"]; ok {
+	if _, ok := a.State.Packages["alpha"].Bins[binName("tool")]; ok {
 		t.Fatal("alpha still claims the transferred binary")
 	}
 
@@ -104,7 +104,7 @@ func TestForceOwnershipTransferKeepsSharedBinary(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("remove alpha: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "bin", "tool")); err != nil {
+	if _, err := os.Stat(filepath.Join(root, "bin", binName("tool"))); err != nil {
 		t.Fatalf("beta's binary was deleted: %v", err)
 	}
 	if a.State.Packages["beta"] == nil {
@@ -118,17 +118,17 @@ func TestPreflightConflictLeavesNoOrphan(t *testing.T) {
 	defer srv.Close()
 
 	a, root := fixture(t, urlPackage("gamma", srv.URL+"/g.tar.gz", "aaa", "zzz"))
-	if err := os.WriteFile(filepath.Join(root, "bin", "zzz"), []byte("unmanaged"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "bin", binName("zzz")), []byte("unmanaged"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	_, err := installOne(t, a, "gamma", InstallOptions{})
 	if err == nil || cerr.KindOf(err) != cerr.Conflict {
 		t.Fatalf("expected a conflict, got %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "bin", "aaa")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(root, "bin", binName("aaa"))); !os.IsNotExist(err) {
 		t.Fatalf("aaa was written despite the preflight failure: %v", err)
 	}
-	if _, ok := a.State.Provides["aaa"]; ok {
+	if _, ok := a.State.Provides[binName("aaa")]; ok {
 		t.Fatal("orphan provides entry for aaa")
 	}
 	if a.State.Packages["gamma"] != nil {
@@ -165,7 +165,7 @@ func TestRemoveModifiedRequiresForce(t *testing.T) {
 	if _, err := installOne(t, a, "mytool", InstallOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	bin := filepath.Join(root, "bin", "mytool")
+	bin := filepath.Join(root, "bin", binName("mytool"))
 	if err := os.WriteFile(bin, []byte("tampered"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +248,7 @@ func TestReinstallIsNoOpButRepairsMissingBinary(t *testing.T) {
 		t.Fatalf("expected up-to-date, got %+v", results)
 	}
 
-	if err := os.Remove(filepath.Join(root, "bin", "mytool")); err != nil {
+	if err := os.Remove(filepath.Join(root, "bin", binName("mytool"))); err != nil {
 		t.Fatal(err)
 	}
 	results, err = installOne(t, a, "mytool", InstallOptions{SkipCurrent: true})
@@ -258,7 +258,7 @@ func TestReinstallIsNoOpButRepairsMissingBinary(t *testing.T) {
 	if results[0].Action == "up-to-date" {
 		t.Fatal("missing binary was not repaired")
 	}
-	if _, err := os.Stat(filepath.Join(root, "bin", "mytool")); err != nil {
+	if _, err := os.Stat(filepath.Join(root, "bin", binName("mytool"))); err != nil {
 		t.Fatalf("binary not restored: %v", err)
 	}
 }
@@ -323,7 +323,7 @@ func TestRemovePreflightsAllBinaries(t *testing.T) {
 	if _, err := installOne(t, a, "mytool", InstallOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "bin", "zzz"), []byte("tampered"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "bin", binName("zzz")), []byte("tampered"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.WithLock(func() error {
@@ -332,7 +332,7 @@ func TestRemovePreflightsAllBinaries(t *testing.T) {
 	}); err == nil {
 		t.Fatal("expected removal to fail")
 	}
-	if _, err := os.Stat(filepath.Join(root, "bin", "aaa")); err != nil {
+	if _, err := os.Stat(filepath.Join(root, "bin", binName("aaa"))); err != nil {
 		t.Fatalf("aaa was deleted before preflight finished: %v", err)
 	}
 	if a.State.Packages["mytool"] == nil {
@@ -347,14 +347,14 @@ func TestInstallRollsBackOnLateFailure(t *testing.T) {
 
 	a, root := fixture(t, urlPackage("mytool", srv.URL+"/t.tar.gz", "aaa", "zzz"))
 	// A directory at a destination cannot be replaced even with --force.
-	if err := os.Mkdir(filepath.Join(root, "bin", "zzz"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(root, "bin", binName("zzz")), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	_, err := installOne(t, a, "mytool", InstallOptions{Force: true})
 	if err == nil {
 		t.Fatal("expected install to fail")
 	}
-	if _, statErr := os.Stat(filepath.Join(root, "bin", "aaa")); !os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(filepath.Join(root, "bin", binName("aaa"))); !os.IsNotExist(statErr) {
 		t.Fatalf("aaa was left behind after rollback: %v", statErr)
 	}
 	if a.State.Packages["mytool"] != nil {
@@ -394,7 +394,7 @@ func TestOfflineReinstallWorksWithoutProbeCache(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	binPath := filepath.Join(root, "bin", "mytool")
+	binPath := filepath.Join(root, "bin", binName("mytool"))
 	if err := os.WriteFile(binPath, []byte("binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +408,7 @@ func TestOfflineReinstallWorksWithoutProbeCache(t *testing.T) {
 		Tag:     "v1.0.0",
 		Bins:    map[string]string{"mytool": hash},
 	}
-	st.Provides["mytool"] = "mytool"
+	st.Provides[binName("mytool")] = "mytool"
 	if err := st.Save(filepath.Join(root, "state.json")); err != nil {
 		t.Fatal(err)
 	}
@@ -465,7 +465,7 @@ func TestVersionlessFallbackNeverOverridesAPin(t *testing.T) {
 	if err == nil {
 		t.Fatal("a pinned version-less install must not fall back to latest")
 	}
-	if _, statErr := os.Stat(filepath.Join(root, "bin", "tool")); !os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(filepath.Join(root, "bin", binName("tool"))); !os.IsNotExist(statErr) {
 		t.Fatalf("latest bytes were installed for a pinned version: %v", statErr)
 	}
 }
@@ -499,7 +499,7 @@ func TestUpdateActuallyUpdatesUnpinnedPackage(t *testing.T) {
 	if _, err := installOne(t, a, "tool@v1.0.0", InstallOptions{}); err != nil {
 		t.Fatalf("install v1: %v", err)
 	}
-	if got := mustRead(t, filepath.Join(root, "bin", "tool")); string(got) != "v1" {
+	if got := mustRead(t, filepath.Join(root, "bin", binName("tool"))); string(got) != "v1" {
 		t.Fatalf("unexpected v1 content %q", got)
 	}
 
@@ -514,7 +514,7 @@ func TestUpdateActuallyUpdatesUnpinnedPackage(t *testing.T) {
 	if len(results) != 1 || results[0].Action != "updated" || results[0].Version != "2.0.0" {
 		t.Fatalf("unexpected update results: %+v", results)
 	}
-	if got := mustRead(t, filepath.Join(root, "bin", "tool")); string(got) != "v2" {
+	if got := mustRead(t, filepath.Join(root, "bin", binName("tool"))); string(got) != "v2" {
 		t.Fatalf("binary was not updated: %q", got)
 	}
 	if a.State.Packages["tool"].Version != "2.0.0" {
@@ -544,10 +544,10 @@ func TestRemoveFailureKeepsBinaryTracked(t *testing.T) {
 	}); err == nil {
 		t.Fatal("expected removal to fail on a read-only directory")
 	}
-	if p := a.State.Packages["mytool"]; p == nil || p.Bins["mytool"] == "" {
+	if p := a.State.Packages["mytool"]; p == nil || p.Bins[binName("mytool")] == "" {
 		t.Fatalf("failed removal dropped tracking: %+v", a.State.Packages["mytool"])
 	}
-	if owner := a.State.Provides["mytool"]; owner != "mytool" {
+	if owner := a.State.Provides[binName("mytool")]; owner != "mytool" {
 		t.Fatalf("ownership lost after failed removal: %q", owner)
 	}
 
@@ -560,7 +560,7 @@ func TestRemoveFailureKeepsBinaryTracked(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("retry remove: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(binDir, "mytool")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(binDir, binName("mytool"))); !os.IsNotExist(err) {
 		t.Fatalf("binary still present after retry: %v", err)
 	}
 }

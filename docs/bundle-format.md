@@ -111,6 +111,10 @@ built on a darwin host is ad-hoc signed after assembly (`codesign --force
 --sign -`) when the tool is available. Cross-built darwin bundles are emitted
 unsigned with a warning; sign them on macOS before distributing.
 
+On Windows the output name gains `.exe`. The running installer image cannot be
+replaced while it is executing, so `cpt.new.exe` is staged and swapped in on
+the next start; package binaries use the same `<name>.new.exe` convention.
+
 ## Run
 
 On startup cpt stats its own executable, reads the last 64 bytes, and enters

@@ -51,14 +51,14 @@ func TestBuildBundleAndRunIt(t *testing.T) {
 	}
 
 	dest := filepath.Join(t.TempDir(), ".cpt")
-	run, err := bundle.Run(context.Background(), out, bundle.RunOptions{Dest: dest})
+	run, err := bundle.Run(context.Background(), res.Path, bundle.RunOptions{Dest: dest})
 	if err != nil {
 		t.Fatalf("bundle.Run: %v", err)
 	}
 	if run.Packages[0].Version != "1.0.0" {
 		t.Fatalf("bundle version: %+v", run.Packages)
 	}
-	data, err := os.ReadFile(filepath.Join(dest, "bin", "tool"))
+	data, err := os.ReadFile(filepath.Join(dest, "bin", binName("tool")))
 	if err != nil || string(data) != "#!/bin/sh\necho bundled\n" {
 		t.Fatalf("installed binary: %v %q", err, data)
 	}
