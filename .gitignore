@@ -1,0 +1,4 @@
+/cpt
+/dist/
+*.test
+coverage.out
