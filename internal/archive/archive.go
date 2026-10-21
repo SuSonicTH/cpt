@@ -263,6 +263,10 @@ func writeEntry(r io.Reader, dest, rel string, mode os.FileMode, size int64) err
 	return nil
 }
 
+// SafeRel validates an archive entry name and returns a cleaned relative path.
+// It rejects absolute paths, volume prefixes and traversal outside the root.
+func SafeRel(name string) (string, error) { return safeRel(name) }
+
 // safeRel rejects absolute paths and traversal outside the extraction root.
 func safeRel(name string) (string, error) {
 	name = filepath.ToSlash(strings.TrimSpace(name))

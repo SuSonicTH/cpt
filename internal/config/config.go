@@ -73,6 +73,7 @@ type Paths struct {
 	Cache      string
 	ProbeCache string
 	ShellCache string
+	SelfCache  string
 	Bundles    string
 	Logs       string
 	Tmp        string
@@ -81,9 +82,14 @@ type Paths struct {
 	LockFile   string
 }
 
-// DefaultRoot returns CPT_ROOT when set, otherwise ~/.cpt.
+// DefaultRoot returns CPT_ROOT when set, then CPT_HOME, otherwise ~/.cpt.
+// Generated cptinit scripts export CPT_HOME so a custom --dest (or --root)
+// remains usable from a new shell.
 func DefaultRoot() (string, error) {
 	if root := strings.TrimSpace(os.Getenv("CPT_ROOT")); root != "" {
+		return filepath.Abs(root)
+	}
+	if root := strings.TrimSpace(os.Getenv("CPT_HOME")); root != "" {
 		return filepath.Abs(root)
 	}
 	home, err := os.UserHomeDir()
@@ -103,6 +109,7 @@ func NewPaths(root string) Paths {
 		Cache:      filepath.Join(root, "cache"),
 		ProbeCache: filepath.Join(root, "cache", "probe"),
 		ShellCache: filepath.Join(root, "cache", "shell"),
+		SelfCache:  filepath.Join(root, "cache", "self"),
 		Bundles:    filepath.Join(root, "bundles"),
 		Logs:       filepath.Join(root, "logs"),
 		Tmp:        filepath.Join(root, "tmp"),
@@ -114,7 +121,7 @@ func NewPaths(root string) Paths {
 
 // Ensure creates the directory tree.
 func (p Paths) Ensure() error {
-	for _, dir := range []string{p.Root, p.Bin, p.Lists, p.Cache, p.ProbeCache, p.ShellCache, p.Bundles, p.Logs, p.Tmp} {
+	for _, dir := range []string{p.Root, p.Bin, p.Lists, p.Cache, p.ProbeCache, p.ShellCache, p.SelfCache, p.Bundles, p.Logs, p.Tmp} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}

@@ -12,6 +12,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/SuSonicTH/cpt/internal/app"
+	"github.com/SuSonicTH/cpt/internal/bundle"
 	"github.com/SuSonicTH/cpt/internal/cerr"
 	"github.com/SuSonicTH/cpt/internal/out"
 	"github.com/SuSonicTH/cpt/internal/version"
@@ -50,10 +51,6 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "cpt: %v\n\n%s", err, usage)
 		return int(cerr.Usage)
 	}
-	if g.Help {
-		fmt.Fprint(stdout, usage)
-		return 0
-	}
 	if g.Version || (len(rest) > 0 && rest[0] == "version") {
 		if g.JSON {
 			p := out.New(stdout, stderr, true, false, true)
@@ -64,6 +61,40 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			}))
 		}
 		fmt.Fprintln(stdout, version.Full())
+		return 0
+	}
+	// A bundle is a self-extracting installer: running it means installing the
+	// payload, so this check must come before command dispatch. The clean cpt
+	// binary installed by the bundle has no footer and runs normally.
+	self, isBundle, bundleErr := bundle.DetectSelf()
+	if isBundle {
+		if bundleErr != nil {
+			printError(g.JSON, stdout, stderr, bundleErr)
+			return cerr.ExitCode(bundleErr)
+		}
+		// A Windows install may have staged a clean cpt.exe.new because the
+		// installer image was running. Use it for normal commands instead of
+		// re-entering bundle mode.
+		if !g.Help && !looksLikeBundleInvocation(rest) {
+			if code, ok := runStagedSelf(self, args, stdout, stderr); ok {
+				return code
+			}
+		}
+		return runBundleMode(ctx, self, rest, g, stdout, stderr)
+	}
+	// A clean cpt may have a staged .new copy from a Windows bundle install.
+	// Swapping before DetectSelf would hide a still-running bundle image.
+	if err := bundle.SwapPendingSelf(); err != nil {
+		fmt.Fprintf(stderr, "cpt: warning: %v\n", err)
+	}
+	if len(rest) > 0 && looksLikeBundleInvocation(rest) {
+		err := cerr.New(cerr.Integrity,
+			"this looks like a bundle invocation, but the executable has no valid bundle footer; the bundle may be truncated or corrupted")
+		printError(g.JSON, stdout, stderr, err)
+		return cerr.ExitCode(err)
+	}
+	if g.Help {
+		fmt.Fprint(stdout, usage)
 		return 0
 	}
 	if len(rest) > 0 && rest[0] == "help" {
@@ -136,6 +167,8 @@ func exitOn(err error) int {
 
 func dispatch(ctx context.Context, a *app.App, cmd string, args []string) error {
 	switch cmd {
+	case "bundle", "bundles":
+		return cmdBundle(ctx, a, args)
 	case "list", "ls":
 		return cmdList(ctx, a, args)
 	case "search":

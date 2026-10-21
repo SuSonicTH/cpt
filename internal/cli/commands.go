@@ -273,17 +273,60 @@ func cmdUpdate(ctx context.Context, a *app.App, args []string) error {
 	fs := newFlagSet("update")
 	force := fs.Bool("force", false, "update even pinned packages")
 	dryRun := fs.Bool("dry-run", false, "show what would change")
+	unfreeze := fs.Bool("unfreeze", false, "make frozen bundle lists writable")
 	fs.Bool("all", false, "update every package (default)")
 	if err := parseFlags(fs, args); err != nil {
 		return cerr.New(cerr.Usage, "%v", err)
 	}
+	if *unfreeze && *dryRun {
+		return cerr.New(cerr.Usage, "--unfreeze changes list state and cannot be combined with --dry-run")
+	}
 	var results []app.Result
+	var unfrozen []string
+	updateArgs := fs.Args()
 	lockErr := a.WithLock(func() error {
+		if *unfreeze && len(fs.Args()) == 0 {
+			unfrozen = a.Unfreeze(nil)
+		} else if *unfreeze {
+			var lists []string
+			var packages []string
+			var listNames []string
+			for _, spec := range fs.Args() {
+				name, _ := splitAt(spec)
+				if a.State.Lists[name] != nil {
+					lists = append(lists, name)
+					listNames = append(listNames, name)
+					continue
+				}
+				packages = append(packages, spec)
+				if p := a.State.Packages[name]; p != nil && p.List != "" {
+					lists = append(lists, p.List)
+				}
+			}
+			if len(lists) > 0 {
+				unfrozen = a.Unfreeze(uniqueStrings(lists))
+			}
+			// A bare list name is an unfreeze target, not an update package.
+			updateArgs = packages
+			if len(packages) == 0 && len(listNames) > 0 {
+				for _, name := range a.InstalledNames() {
+					if p := a.State.Packages[name]; p != nil && containsString(listNames, p.List) {
+						updateArgs = append(updateArgs, name)
+					}
+				}
+				if len(updateArgs) == 0 {
+					return nil
+				}
+			}
+		}
 		a.MaybeRefresh(ctx, false, false)
 		var err error
-		results, err = a.Update(ctx, fs.Args(), *force, *dryRun)
+		results, err = a.Update(ctx, updateArgs, *force, *dryRun)
 		return err
 	})
+	if len(unfrozen) > 0 && !a.Out.JSON {
+		a.Out.Infof("unfroze list(s): %s", strings.Join(unfrozen, ", "))
+	}
 	if !a.Out.JSON && len(results) == 0 && lockErr == nil {
 		a.Out.Infof("nothing to update")
 	}
@@ -446,6 +489,8 @@ func printResults(a *app.App, results []app.Result) {
 			a.Out.Infof("%s %s is up to date", r.Name, r.Version)
 		case "skipped (pinned)":
 			a.Out.Infof("%s is pinned to %s (use --force to update)", r.Name, r.Version)
+		case "skipped (frozen)":
+			a.Out.Infof("%s belongs to a frozen bundle list; run cpt update --unfreeze to make it writable", r.Name)
 		case "would install", "would update":
 			a.Out.Line("%s %s %s", r.Action, r.Name, r.Version)
 			if r.URL != "" {
@@ -462,6 +507,28 @@ func splitAt(s string) (string, string) {
 		return s[:i], s[i+1:]
 	}
 	return s, ""
+}
+
+func containsString(in []string, want string) bool {
+	for _, s := range in {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+func uniqueStrings(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 func sortedKeys(m map[string]string) []string {

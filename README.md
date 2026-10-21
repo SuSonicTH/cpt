@@ -14,8 +14,9 @@ cpt install fzf ripgrep jq
 
 ## Status
 
-This is milestone **v0.2**: the core engine, the CLI, the master package list,
-shell integration, and the interactive TUI are complete.
+This is milestone **v0.3**: the core engine, the CLI, the master package list,
+shell integration, the interactive TUI, and self-extracting bundles are
+complete.
 
 | Area | State |
 |---|---|
@@ -26,8 +27,8 @@ shell integration, and the interactive TUI are complete.
 | Install, update, remove, pin, verify, doctor | done |
 | `cptinit` for bash/zsh/PowerShell, `init --install` | done |
 | Shell packages (inline and URL snippets) with approval | done |
-| Interactive TUI (packages, lists, log, progress, multi-select) | done |
-| Self-extracting bundles for remote machines | planned (M4) |
+| Interactive TUI (packages, lists, bundles, log, progress, multi-select) | done |
+| Self-extracting bundles for remote machines (live and frozen) | done |
 | Windows shell packages | deferred |
 
 See [PLAN.md](PLAN.md) for the full design and roadmap.
@@ -75,7 +76,7 @@ Running `cpt` with no arguments in a terminal opens the TUI:
 cpt
 ```
 
-Tabs cover packages, lists and the log. Installs and updates run in the
+Tabs cover packages, lists, bundles and the log. Installs and updates run in the
 background with per-package spinners and an aggregate progress bar. Use
 `space` to multi-select packages, `/` to search, `i` to install, `u` to update,
 `d` to remove, `X` to force-remove modified files, `p` to pin, `enter` for a
@@ -273,6 +274,42 @@ working; already-running shells keep any functions they loaded until restarted.
 List changes made while snippets are disabled are recorded and re-synced when
 they are enabled again.
 
+## Bundles
+
+A bundle is one native executable containing cpt plus a chosen set of tools.
+Copy it to another machine and run it; no Go toolchain, network access, or
+package manager is needed on the target.
+
+```sh
+cpt bundle create devbox --packages fzf,jq,ripgrep --target linux/arm64 --frozen
+cpt bundle rebuild devbox
+cpt bundle list
+```
+
+The bundle is written to `~/.cpt/bundles/devbox-linux-arm64` and its manifest to
+`~/.cpt/bundles/devbox.json`. `rebuild` uses a saved list snapshot and approved
+shell snippets, reproduces the exact versions, and fails if an upstream asset no
+longer matches the recorded download hash (`--force-checksum` overrides).
+Re-building the same name for another target retires the previous executable.
+
+On the target:
+
+```sh
+./devbox-linux-arm64                 # install into ~/.cpt
+./devbox-linux-arm64 --dest /opt/cpt  # custom root
+./devbox-linux-arm64 --list          # inspect without installing
+./devbox-linux-arm64 --dry-run
+./devbox-linux-arm64 --install-init  # also add the shell startup block
+```
+
+Re-running the same bundle is idempotent. A frozen bundle ships read-only lists:
+`cpt update` explains that the environment is frozen until
+`cpt update --unfreeze` clears the flag. Live bundles leave lists writable.
+Building for another platform downloads the matching cpt release into
+`cache/self/`; `--base PATH` supplies a base binary explicitly (for example a
+locally cross-compiled one). See [docs/bundle-format.md](docs/bundle-format.md)
+for the container and payload format.
+
 ## Layout
 
 ```
@@ -283,13 +320,17 @@ they are enabled again.
 ├── lists/           # core.json and any lists you add
 ├── cache/probe/     # cached upstream tags
 ├── cache/shell/     # verified URL snippets, content addressed
+├── cache/self/      # cross-platform cpt base binaries for bundles
+├── bundles/         # self-extracting executables and their manifests
 ├── cptinit.sh       # generated; source this from a shell
 ├── cptinit.ps1      # generated; dot-source this from PowerShell
 ├── logs/cpt.log
 └── tmp/             # staging, cleaned per operation
 ```
 
-Override the root with `--root DIR` or `CPT_ROOT`.
+Override the root with `--root DIR`, `CPT_ROOT`, or `CPT_HOME` (in that order).
+Generated `cptinit` scripts export `CPT_HOME`, so a bundle installed with a
+custom `--dest` stays usable in new shells.
 
 ## Development
 

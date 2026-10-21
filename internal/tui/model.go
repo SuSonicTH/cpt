@@ -19,10 +19,11 @@ type tab int
 const (
 	tabPackages tab = iota
 	tabLists
+	tabBundles
 	tabLog
 )
 
-var tabNames = []string{"Packages", "Lists", "Log"}
+var tabNames = []string{"Packages", "Lists", "Bundles", "Log"}
 
 func (t tab) String() string {
 	if t >= 0 && int(t) < len(tabNames) {
@@ -39,6 +40,11 @@ const (
 	promptRemoveList
 	promptRemovePackages
 	promptForceRemove
+	promptBundleName
+	promptBundleTarget
+	promptBundlePackages
+	promptBundleFrozen
+	promptRemoveBundle
 )
 
 type promptState struct {
@@ -56,6 +62,13 @@ const (
 	overlayShell
 	overlayDetail
 )
+
+type bundleDraft struct {
+	name     string
+	target   string
+	packages []string
+	frozen   bool
+}
 
 type activity struct {
 	State    string
@@ -99,6 +112,11 @@ type Model struct {
 	pendingShells int
 	listCursor    int
 	listOffset    int
+
+	bundles      []app.BundleInfo
+	bundleCursor int
+	bundleOffset int
+	bundleDraft  *bundleDraft
 
 	logLines   []string
 	liveLog    []string
@@ -278,6 +296,13 @@ func (m *Model) currentList() *app.ListInfo {
 		return nil
 	}
 	return &m.lists[m.listCursor]
+}
+
+func (m *Model) currentBundle() *app.BundleInfo {
+	if m.bundleCursor < 0 || m.bundleCursor >= len(m.bundles) {
+		return nil
+	}
+	return &m.bundles[m.bundleCursor]
 }
 
 func (m *Model) pendingShellNames() []string {

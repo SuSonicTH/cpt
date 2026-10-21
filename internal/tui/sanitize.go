@@ -38,6 +38,18 @@ func sanitizeLists(lists []app.ListInfo) []app.ListInfo {
 	return out
 }
 
+func sanitizeBundles(bundles []app.BundleInfo) []app.BundleInfo {
+	out := make([]app.BundleInfo, len(bundles))
+	for i, b := range bundles {
+		b.Name = sanitize(b.Name, false)
+		b.Path = sanitize(b.Path, false)
+		b.Manifest = sanitize(b.Manifest, false)
+		b.Target = sanitize(b.Target, false)
+		out[i] = b
+	}
+	return out
+}
+
 func sanitizeShells(shells []app.ShellInfo) []app.ShellInfo {
 	out := make([]app.ShellInfo, len(shells))
 	for i, info := range shells {

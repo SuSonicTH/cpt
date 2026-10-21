@@ -18,6 +18,7 @@ import (
 type snapshotMsg struct {
 	rows    []app.Row
 	lists   []app.ListInfo
+	bundles []app.BundleInfo
 	shells  []app.ShellInfo
 	pending int
 	err     error
@@ -38,8 +39,9 @@ type opDoneMsg struct {
 }
 
 type actionDoneMsg struct {
-	status string
-	err    error
+	status   string
+	err      error
+	warnings []string
 }
 
 type tickMsg time.Time
@@ -70,9 +72,11 @@ func waitEventCmd(ch <-chan progress.Event, done <-chan struct{}) tea.Cmd {
 // command is mutating the app.
 func snapshot(a *app.App, ctx context.Context, probe bool) snapshotMsg {
 	rows, err := a.Rows(ctx, app.ListOptions{Updates: probe})
+	bundles, _ := a.Bundles()
 	return snapshotMsg{
 		rows:    rows,
 		lists:   a.Lists(),
+		bundles: bundles,
 		shells:  a.ShellInfos(),
 		pending: a.PendingShellCount(),
 		err:     err,
@@ -246,6 +250,74 @@ func removeListCmd(ctx context.Context, a *app.App, name string) tea.Cmd {
 		}
 		return actionDoneMsg{status: status}
 	}
+}
+
+func bundleCreateCmd(ctx context.Context, a *app.App, opt app.BundleOptions) tea.Cmd {
+	return func() tea.Msg {
+		var res app.BundleBuildResult
+		err := a.WithBuildLock(func() error {
+			var e error
+			res, e = a.BuildBundle(ctx, opt)
+			return e
+		})
+		if err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{
+			status: fmt.Sprintf("built %s for %s (%s, sha256:%s)",
+				res.Name, res.Target, formatSize(res.Size), shortHash(res.SHA256)),
+			warnings: res.Warnings,
+		}
+	}
+}
+
+func bundleRebuildCmd(ctx context.Context, a *app.App, name string) tea.Cmd {
+	return func() tea.Msg {
+		var res app.BundleBuildResult
+		err := a.WithBuildLock(func() error {
+			var e error
+			res, e = a.RebuildBundle(ctx, name)
+			return e
+		})
+		if err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{
+			status:   fmt.Sprintf("rebuilt %s for %s (%s)", res.Name, res.Target, formatSize(res.Size)),
+			warnings: res.Warnings,
+		}
+	}
+}
+
+func bundleRemoveCmd(ctx context.Context, a *app.App, name string) tea.Cmd {
+	return func() tea.Msg {
+		err := a.WithLock(func() error {
+			_, e := a.RemoveBundle(name)
+			return e
+		})
+		if err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{status: "removed bundle " + name}
+	}
+}
+
+func formatSize(n int64) string {
+	switch {
+	case n <= 0:
+		return "0 B"
+	case n < 1024*1024:
+		return fmt.Sprintf("%d KiB", n/1024)
+	default:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1024*1024))
+	}
+}
+
+func shortHash(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
 }
 
 func shellDecisionCmd(ctx context.Context, a *app.App, names []string, all, approve bool) tea.Cmd {

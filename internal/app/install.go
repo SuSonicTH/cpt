@@ -117,6 +117,11 @@ func (a *App) Update(ctx context.Context, names []string, force, dry bool) ([]Re
 			a.emit(progress.Event{Kind: progress.KindDone, Package: name, Version: p.Version, Action: "skipped (pinned)"})
 			continue
 		}
+		if meta := a.State.Lists[p.List]; meta != nil && meta.Readonly {
+			results = append(results, Result{Name: name, Version: p.Version, Action: "skipped (frozen)"})
+			a.emit(progress.Event{Kind: progress.KindDone, Package: name, Version: p.Version, Action: "skipped (frozen)"})
+			continue
+		}
 		entry, err := cat.Lookup(name)
 		if err != nil {
 			results = append(results, Result{Name: name, Action: "failed", Err: err, ErrText: err.Error()})
@@ -389,6 +394,29 @@ func (a *App) installRequests(ctx context.Context, reqs []request, opt InstallOp
 	return results, firstResultError(results)
 }
 
+// downloadAsset downloads res.URL with the latest/download fallback for
+// version-less, unpinned assets. It is shared by install and bundle build so
+// both paths handle release assets identically.
+func (a *App) downloadAsset(ctx context.Context, res *resolve.Resolution, down *fetch.Downloader, dest string) (string, error) {
+	sha, _, err := down.To(ctx, res.URL, dest, res.Name)
+	if err != nil && errors.Is(err, httpc.ErrNotFound) && !res.AssetVersioned && !res.Pinned && res.Canonical != "" {
+		alt := a.Prober.LatestAssetURL(res.Canonical, res.Asset)
+		if alt != res.URL {
+			if altSHA, _, altErr := down.To(ctx, alt, dest, res.Name); altErr == nil {
+				sha, err = altSHA, nil
+				res.URL = alt
+				if tagErr := a.adoptLatestTag(ctx, res); tagErr != nil {
+					return "", fmt.Errorf("%s: %w", res.Name, tagErr)
+				}
+			}
+		}
+	}
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", res.Name, err)
+	}
+	return sha, nil
+}
+
 // adoptLatestTag refreshes the resolved tag after a latest/download fallback,
 // so state and checksum candidates refer to the bytes actually downloaded.
 func (a *App) adoptLatestTag(ctx context.Context, res *resolve.Resolution) error {
@@ -498,24 +526,9 @@ func (a *App) stage(ctx context.Context, req request, plat platform.Platform, pr
 		},
 	}
 	a.emit(progress.Event{Kind: progress.KindDownloading, Package: res.Name, Version: res.Version})
-	sha, _, err := down.To(ctx, res.URL, assetPath, res.Name)
-	if err != nil && errors.Is(err, httpc.ErrNotFound) && !res.AssetVersioned && !res.Pinned && res.Canonical != "" {
-		// Version-less assets are only reachable through the latest path, and
-		// only when the caller did not pin a specific release.
-		alt := a.Prober.LatestAssetURL(res.Canonical, res.Asset)
-		if alt != res.URL {
-			if altSHA, _, altErr := down.To(ctx, alt, assetPath, res.Name); altErr == nil {
-				sha, err = altSHA, nil
-				res.URL = alt
-				if tagErr := a.adoptLatestTag(ctx, res); tagErr != nil {
-					st.err = fmt.Errorf("%s: %w", res.Name, tagErr)
-					return st
-				}
-			}
-		}
-	}
+	sha, err := a.downloadAsset(ctx, res, down, assetPath)
 	if err != nil {
-		st.err = fmt.Errorf("%s: %w", res.Name, err)
+		st.err = err
 		return st
 	}
 	st.sha = sha

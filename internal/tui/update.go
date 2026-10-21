@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/SuSonicTH/cpt/internal/app"
+	"github.com/SuSonicTH/cpt/internal/platform"
 	"github.com/SuSonicTH/cpt/internal/progress"
 )
 
@@ -40,6 +42,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setRows(msg.rows)
 		}
 		m.lists = sanitizeLists(msg.lists)
+		m.bundles = sanitizeBundles(msg.bundles)
 		m.shells = sanitizeShells(msg.shells)
 		m.pendingShells = msg.pending
 		if m.listCursor >= len(m.lists) {
@@ -49,6 +52,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.listCursor = 0
 		}
 		m.ensureListVisible(m.listTableHeight())
+		if m.bundleCursor >= len(m.bundles) {
+			m.bundleCursor = len(m.bundles) - 1
+		}
+		if m.bundleCursor < 0 {
+			m.bundleCursor = 0
+		}
+		m.ensureBundleVisible(m.bundleTableHeight())
 		for name := range m.selected {
 			found := false
 			for i := range m.rows {
@@ -140,6 +150,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.opName = ""
 		text := msg.status
 		isErr := msg.err != nil
+		for _, w := range msg.warnings {
+			m.appendLog("warning: " + w)
+		}
 		if isErr {
 			text = msg.err.Error()
 			m.appendLog("✗ " + msg.err.Error())
@@ -151,7 +164,31 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) listTableHeight() int { return maxInt(3, m.bodyHeight()-8) }
 
+func (m *Model) bundleTableHeight() int { return maxInt(3, m.bodyHeight()-8) }
+
 func (m *Model) shellListHeight() int { return maxInt(2, m.bodyHeight()-2) }
+
+func (m *Model) ensureBundleVisible(height int) {
+	if height < 1 {
+		height = 1
+	}
+	if m.bundleCursor < m.bundleOffset {
+		m.bundleOffset = m.bundleCursor
+	}
+	if m.bundleCursor >= m.bundleOffset+height {
+		m.bundleOffset = m.bundleCursor - height + 1
+	}
+	maxOffset := len(m.bundles) - height
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if m.bundleOffset > maxOffset {
+		m.bundleOffset = maxOffset
+	}
+	if m.bundleOffset < 0 {
+		m.bundleOffset = 0
+	}
+}
 
 func (m *Model) ensureShellVisible(height int) {
 	if height < 1 {
@@ -207,6 +244,7 @@ func (m *Model) resize() {
 	}
 	m.ensureCursorVisible(body)
 	m.ensureListVisible(m.listTableHeight())
+	m.ensureBundleVisible(m.bundleTableHeight())
 	if m.overlay == overlayShell {
 		m.ensureShellVisible(m.shellListHeight())
 		m.wrapShellDiff()
@@ -374,14 +412,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.help = true
 		return m, nil
 	case "tab":
-		return m, m.setTab((m.tab + 1) % 3)
+		return m, m.setTab((m.tab + 1) % tab(len(tabNames)))
 	case "shift+tab":
-		return m, m.setTab((m.tab + 2) % 3)
+		return m, m.setTab((m.tab + tab(len(tabNames)) - 1) % tab(len(tabNames)))
 	case "1":
 		return m, m.setTab(tabPackages)
 	case "2":
 		return m, m.setTab(tabLists)
 	case "3":
+		return m, m.setTab(tabBundles)
+	case "4":
 		return m, m.setTab(tabLog)
 	case "esc":
 		if m.running {
@@ -412,6 +452,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handlePackagesKey(msg)
 	case tabLists:
 		return m.handleListsKey(msg)
+	case tabBundles:
+		return m.handleBundlesKey(msg)
 	case tabLog:
 		return m.handleLogKey(msg)
 	}
@@ -655,6 +697,117 @@ func (m *Model) handleListsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) handleBundlesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		if m.bundleCursor > 0 {
+			m.bundleCursor--
+		}
+		m.ensureBundleVisible(m.bundleTableHeight())
+	case "down", "j":
+		if m.bundleCursor < len(m.bundles)-1 {
+			m.bundleCursor++
+		}
+		m.ensureBundleVisible(m.bundleTableHeight())
+	case "home", "g":
+		m.bundleCursor = 0
+		m.ensureBundleVisible(m.bundleTableHeight())
+	case "end", "G":
+		if len(m.bundles) > 0 {
+			m.bundleCursor = len(m.bundles) - 1
+		}
+		m.ensureBundleVisible(m.bundleTableHeight())
+	case "n":
+		if m.busy() {
+			return m, m.setStatus("an operation is already running", true)
+		}
+		if m.app.Offline {
+			return m, m.setStatus("cannot build a bundle in offline mode", true)
+		}
+		m.bundleDraft = &bundleDraft{target: platform.Current().String()}
+		return m, m.openPrompt(promptBundleName, "new bundle: name", "devbox", "", nil, "")
+	case "r":
+		b := m.currentBundle()
+		if b == nil {
+			return m, m.setStatus("no bundle selected", true)
+		}
+		if m.busy() {
+			return m, m.setStatus("an operation is already running", true)
+		}
+		if m.app.Offline {
+			return m, m.setStatus("cannot rebuild a bundle in offline mode", true)
+		}
+		m.clearStatus()
+		ctx, cancel := context.WithCancel(m.ctx)
+		m.cancel = cancel
+		m.running = true
+		m.opName = "rebuild " + b.Name
+		return m, bundleRebuildCmd(ctx, m.app, b.Name)
+	case "d", "x":
+		b := m.currentBundle()
+		if b == nil {
+			return m, m.setStatus("no bundle selected", true)
+		}
+		return m, m.openPrompt(promptRemoveBundle, "remove bundle "+b.Name+"?", "", "", nil, b.Name)
+	case "enter":
+		if b := m.currentBundle(); b != nil {
+			return m, m.setStatus(b.Path, false)
+		}
+	}
+	return m, nil
+}
+
+// installedForTarget lists installed packages that declare support for target,
+// so the wizard starts from a set that can actually be resolved.
+func (m *Model) installedForTarget(target platform.Platform) []string {
+	cat, err := m.app.Catalog()
+	if err != nil {
+		return nil
+	}
+	installed := map[string]bool{}
+	for i := range m.rows {
+		if m.rows[i].Version != "" {
+			installed[m.rows[i].Name] = true
+		}
+	}
+	var names []string
+	for _, entry := range cat.Entries() {
+		if !installed[entry.Pkg.Name] {
+			continue
+		}
+		if entry.Pkg.Source.Type == "url" || entry.Pkg.Source.Asset[target.String()] != "" {
+			names = append(names, entry.Pkg.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (m *Model) startBundleBuild() tea.Cmd {
+	draft := m.bundleDraft
+	if draft == nil {
+		return m.setStatus("bundle wizard was cancelled", true)
+	}
+	m.bundleDraft = nil
+	packages := draft.packages
+	if len(packages) == 0 {
+		if target, err := platform.Parse(draft.target); err == nil {
+			packages = m.installedForTarget(target)
+		}
+	}
+	opt := app.BundleOptions{
+		Name:     draft.name,
+		Target:   draft.target,
+		Packages: packages,
+		Frozen:   draft.frozen,
+	}
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.cancel = cancel
+	m.running = true
+	m.opName = "bundle " + draft.name
+	return bundleCreateCmd(ctx, m.app, opt)
+}
+
 func (m *Model) handleShellKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 	if m.busy() && key != "esc" && key != "q" {
@@ -791,7 +944,11 @@ func (m *Model) openPrompt(kind promptKind, title, placeholder, value string, na
 func (m *Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
+		kind := m.prompt.kind
 		m.prompt = nil
+		if kind >= promptBundleName && kind <= promptBundleFrozen {
+			m.bundleDraft = nil
+		}
 		return m, nil
 	case "enter":
 		p := m.prompt
@@ -813,6 +970,46 @@ func (m *Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.beginOperation("remove", p.names)
 		case promptForceRemove:
 			return m, m.beginOperationForce("remove", p.names, true)
+		case promptBundleName:
+			if value == "" {
+				return m, m.setStatus("a bundle name is required", true)
+			}
+			if m.bundleDraft == nil {
+				m.bundleDraft = &bundleDraft{target: platform.Current().String()}
+			}
+			m.bundleDraft.name = value
+			return m, m.openPrompt(promptBundleTarget, "target platform", "linux/amd64", m.bundleDraft.target, nil, "")
+		case promptBundleTarget:
+			target, err := platform.Parse(value)
+			if err != nil {
+				cmd := m.setStatus(err.Error(), true)
+				return m, tea.Batch(cmd, m.openPrompt(promptBundleTarget, "target platform", "linux/amd64", value, nil, ""))
+			}
+			m.bundleDraft.target = target.String()
+			defaults := strings.Join(m.installedForTarget(target), ",")
+			return m, m.openPrompt(promptBundlePackages, "packages (comma separated)", "blank = installed packages", defaults, nil, "")
+		case promptBundlePackages:
+			m.bundleDraft.packages = splitPackageList(value)
+			return m, m.openPrompt(promptBundleFrozen, "frozen bundle?", "y/N", "n", nil, "")
+		case promptBundleFrozen:
+			switch strings.ToLower(value) {
+			case "y", "yes", "true":
+				m.bundleDraft.frozen = true
+			case "", "n", "no", "false":
+				m.bundleDraft.frozen = false
+			default:
+				cmd := m.setStatus("answer y or n", true)
+				return m, tea.Batch(cmd, m.openPrompt(promptBundleFrozen, "frozen bundle?", "y/N", value, nil, ""))
+			}
+			if m.app.Offline {
+				return m, m.setStatus("cannot build a bundle in offline mode", true)
+			}
+			m.clearStatus()
+			return m, m.startBundleBuild()
+		case promptRemoveBundle:
+			m.clearStatus()
+			m.loadingRows = true
+			return m, bundleRemoveCmd(m.ctx, m.app, p.list)
 		}
 		return m, nil
 	default:
@@ -843,6 +1040,16 @@ func (m *Model) beginOperationForce(op string, names []string, force bool) tea.C
 	return operationCmd(ctx, m.app, op, names, force)
 }
 
+func splitPackageList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 func summarizeResults(op string, results []app.Result, err error) (string, bool) {
 	if err != nil && len(results) == 0 {
 		return err.Error(), true
@@ -860,7 +1067,7 @@ func summarizeResults(op string, results []app.Result, err error) (string, bool)
 		}
 	}
 	var parts []string
-	for _, key := range []string{"installed", "updated", "reinstalled", "removed", "up-to-date", "skipped (pinned)", "failed"} {
+	for _, key := range []string{"installed", "updated", "reinstalled", "removed", "up-to-date", "skipped (pinned)", "skipped (frozen)", "failed"} {
 		if counts[key] > 0 {
 			parts = append(parts, fmt.Sprintf("%d %s", counts[key], key))
 		}

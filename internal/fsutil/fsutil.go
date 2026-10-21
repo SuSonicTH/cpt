@@ -77,6 +77,37 @@ func CopyFileAtomic(src, dst string, perm os.FileMode) error {
 	return nil
 }
 
+// CleanTmp removes cpt-owned staging entries from a tmp directory. It never
+// deletes unrelated files, because --dest may point into an existing tree.
+func CleanTmp(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !isStagingName(name) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isStagingName(name string) bool {
+	for _, prefix := range []string{"stage-", "build-", "bundle-", "self-"} {
+		if len(name) > len(prefix) && name[:len(prefix)] == prefix {
+			return true
+		}
+	}
+	return false
+}
+
 // Exists reports whether path exists.
 func Exists(path string) bool {
 	_, err := os.Lstat(path)

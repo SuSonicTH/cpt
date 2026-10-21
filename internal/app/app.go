@@ -15,6 +15,7 @@ import (
 
 	cpt "github.com/SuSonicTH/cpt"
 	"github.com/SuSonicTH/cpt/internal/config"
+	"github.com/SuSonicTH/cpt/internal/fsutil"
 	"github.com/SuSonicTH/cpt/internal/httpc"
 	"github.com/SuSonicTH/cpt/internal/list"
 	"github.com/SuSonicTH/cpt/internal/logx"
@@ -186,9 +187,10 @@ func (a *App) WithLock(fn func() error) error {
 	if err := a.loadState(); err != nil {
 		return err
 	}
-	// No other cpt process can be staging files while we hold the lock.
-	if err := os.RemoveAll(a.Paths.Tmp); err == nil {
-		_ = os.MkdirAll(a.Paths.Tmp, 0o755)
+	// No other cpt process can be staging files while we hold the lock. Only
+	// remove cpt-owned staging names: a custom root may share tmp with users.
+	if err := os.MkdirAll(a.Paths.Tmp, 0o755); err == nil {
+		_ = fsutil.CleanTmp(a.Paths.Tmp)
 	}
 	fnErr := fn()
 	// Apply a config change made while this operation was running before

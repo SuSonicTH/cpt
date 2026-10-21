@@ -56,6 +56,33 @@ func send(m *Model, s string) {
 	m.Update(keyMsg(s))
 }
 
+func TestBundleWizardCollectsInput(t *testing.T) {
+	m := testModel(t)
+	m.loadingRows = false
+	m.setTab(tabBundles)
+	send(m, "n")
+	if m.prompt == nil || m.prompt.kind != promptBundleName {
+		t.Fatalf("bundle wizard did not start: %+v", m.prompt)
+	}
+	m.prompt.input.SetValue("devbox")
+	send(m, "enter")
+	if m.prompt == nil || m.prompt.kind != promptBundleTarget {
+		t.Fatalf("target prompt missing: %+v", m.prompt)
+	}
+	send(m, "enter")
+	if m.prompt == nil || m.prompt.kind != promptBundlePackages {
+		t.Fatalf("packages prompt missing: %+v", m.prompt)
+	}
+	send(m, "enter")
+	if m.prompt == nil || m.prompt.kind != promptBundleFrozen {
+		t.Fatalf("frozen prompt missing: %+v", m.prompt)
+	}
+	send(m, "enter")
+	if m.running != true || m.bundleDraft != nil {
+		t.Fatalf("bundle build did not start: running=%v draft=%+v", m.running, m.bundleDraft)
+	}
+}
+
 func loadRows(t *testing.T, m *Model) {
 	t.Helper()
 	_, cmd := m.Update(snapshotMsg{
@@ -129,7 +156,7 @@ func TestModelTabsAndPrompt(t *testing.T) {
 		t.Fatalf("tab = %v, want lists", m.tab)
 	}
 	view := m.View()
-	for _, want := range []string{"Packages", "Lists", "Log", "NAME"} {
+	for _, want := range []string{"Packages", "Lists", "Bundles", "Log", "NAME"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view missing %q:\n%s", want, view)
 		}
@@ -145,6 +172,10 @@ func TestModelTabsAndPrompt(t *testing.T) {
 	}
 
 	send(m, "3")
+	if m.tab != tabBundles {
+		t.Fatalf("tab = %v, want bundles", m.tab)
+	}
+	send(m, "4")
 	if m.tab != tabLog {
 		t.Fatalf("tab = %v, want log", m.tab)
 	}

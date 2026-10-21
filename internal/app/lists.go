@@ -164,6 +164,10 @@ func (a *App) AddList(ctx context.Context, spec string, opts AddListOptions) (Ad
 		if !opts.Replace {
 			return AddResult{}, cerr.New(cerr.Conflict, "list %q already exists (use --replace)", name)
 		}
+		if existing.Readonly {
+			return AddResult{}, cerr.New(cerr.Conflict,
+				"list %q is frozen by a bundle; run cpt update --unfreeze before replacing it", name)
+		}
 	}
 	if name == "core" {
 		return AddResult{}, cerr.New(cerr.Conflict, "the name %q is reserved for the builtin list", name)

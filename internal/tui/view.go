@@ -41,6 +41,8 @@ func (m *Model) View() string {
 			body = m.viewPackages(width, bodyHeight)
 		case tabLists:
 			body = m.viewLists(width, bodyHeight)
+		case tabBundles:
+			body = m.viewBundles(width, bodyHeight)
 		case tabLog:
 			body = m.viewLog(width, bodyHeight)
 		}
@@ -393,6 +395,58 @@ func (m *Model) viewShell(width, height int) string {
 	return joinColumns(leftText, rightText, leftWidth, height)
 }
 
+func (m *Model) viewBundles(width, height int) string {
+	lines := []string{
+		styleDim.Render(padRight(fmt.Sprintf("%-18s %-14s %-9s %-10s %-12s %s", "NAME", "TARGET", "PACKAGES", "SIZE", "CREATED", "KIND"), width)),
+	}
+	tableRows := maxInt(3, height-8)
+	end := minInt(len(m.bundles), m.bundleOffset+tableRows)
+	for i := m.bundleOffset; i < end; i++ {
+		b := &m.bundles[i]
+		kind := "live"
+		kindStyle := "dim"
+		if b.Frozen {
+			kind = "frozen"
+			kindStyle = "warn"
+		}
+		line := fmt.Sprintf("%-18s %-14s %-9d %-10s %-12s %s",
+			truncate(b.Name, 18), b.Target, b.Packages, formatSize(b.Size), humanAge(b.Created), kind)
+		line = truncate(line, width)
+		if i == m.bundleCursor {
+			line = styleSelect.Render(padRight(line, width))
+		} else if kindStyle == "warn" {
+			line = styleWarn.Render(line)
+		}
+		lines = append(lines, line)
+	}
+	if len(m.bundles) == 0 {
+		lines = append(lines, styleDim.Render("no bundles built yet; press n to create one"))
+	}
+	lines = append(lines, "")
+	if b := m.currentBundle(); b != nil {
+		lines = append(lines, styleTitle.Render(b.Name))
+		lines = append(lines, wrapText(b.Path, width, 0)...)
+		detail := fmt.Sprintf("%s · %d packages · %s · built %s", b.Target, b.Packages, frozenLabel(b.Frozen), humanAge(b.Created))
+		lines = append(lines, styleDim.Render(detail))
+		lines = append(lines, styleDim.Render("manifest: "+b.Manifest))
+		if b.Frozen {
+			lines = append(lines, styleDim.Render("frozen: cpt update explains itself until --unfreeze"))
+		}
+	}
+	if m.bundleDraft != nil {
+		lines = append(lines, "", styleAccent.Render("bundle wizard: "+m.bundleDraft.name+" → "+m.bundleDraft.target))
+	}
+	lines = append(lines, "", styleDim.Render("n new · r rebuild · d remove · enter path · tab switch · q quit"))
+	return strings.Join(fitLines(lines, width, height), "\n")
+}
+
+func frozenLabel(frozen bool) string {
+	if frozen {
+		return "frozen"
+	}
+	return "live"
+}
+
 func (m *Model) viewLog(width, height int) string {
 	lines := []string{styleDim.Render(truncate(filepath.Join(m.app.Paths.Logs, "cpt.log"), width))}
 	if m.logErr != "" {
@@ -513,6 +567,8 @@ func (m *Model) helpLine() string {
 		return "/ search · space select · a all updates · i install · u update · d remove · p pin · enter detail · r refresh · q quit"
 	case tabLists:
 		return "n add · r refresh · R refresh all · x remove · s shell changes · tab switch · q quit"
+	case tabBundles:
+		return "n new · r rebuild · d remove · enter path · tab switch · q quit"
 	case tabLog:
 		return "↑/↓ scroll · pgup/pgdn · g/G top/bottom · tab switch · q quit"
 	}
@@ -524,7 +580,7 @@ func (m *Model) viewHelp(width, height int) string {
 		styleTitle.Render("cpt keys"),
 		"",
 		styleAccent.Render("Global"),
-		"  tab / shift+tab   switch tabs (1, 2, 3 jump directly)",
+		"  tab / shift+tab   switch tabs (1, 2, 3, 4 jump directly)",
 		"  ?                 toggle this help",
 		"  q / ctrl+c        quit",
 		"  esc               cancel an operation, clear search or selection",
@@ -547,6 +603,12 @@ func (m *Model) viewHelp(width, height int) string {
 		"  r / R             refresh the selected list / all lists",
 		"  x                 remove the selected list",
 		"  s                 review pending shell snippet changes",
+		"",
+		styleAccent.Render("Bundles"),
+		"  n                 create a bundle (name, target, packages, live/frozen)",
+		"  r                 rebuild the selected bundle from its exact versions",
+		"  d                 delete the selected bundle and its manifest",
+		"  enter             show the bundle file path",
 		"",
 		styleAccent.Render("Log"),
 		"  ↑/↓, pgup/pgdn    scroll · g/G top/bottom",
