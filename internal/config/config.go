@@ -72,6 +72,7 @@ type Paths struct {
 	Lists      string
 	Cache      string
 	ProbeCache string
+	ShellCache string
 	Bundles    string
 	Logs       string
 	Tmp        string
@@ -101,6 +102,7 @@ func NewPaths(root string) Paths {
 		Lists:      filepath.Join(root, "lists"),
 		Cache:      filepath.Join(root, "cache"),
 		ProbeCache: filepath.Join(root, "cache", "probe"),
+		ShellCache: filepath.Join(root, "cache", "shell"),
 		Bundles:    filepath.Join(root, "bundles"),
 		Logs:       filepath.Join(root, "logs"),
 		Tmp:        filepath.Join(root, "tmp"),
@@ -112,7 +114,7 @@ func NewPaths(root string) Paths {
 
 // Ensure creates the directory tree.
 func (p Paths) Ensure() error {
-	for _, dir := range []string{p.Root, p.Bin, p.Lists, p.Cache, p.ProbeCache, p.Bundles, p.Logs, p.Tmp} {
+	for _, dir := range []string{p.Root, p.Bin, p.Lists, p.Cache, p.ProbeCache, p.ShellCache, p.Bundles, p.Logs, p.Tmp} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}

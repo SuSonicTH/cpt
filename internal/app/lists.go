@@ -38,6 +38,13 @@ func (a *App) Refresh(ctx context.Context, names []string, force bool) ([]Refres
 	if a.Offline {
 		return nil, fmt.Errorf("cannot refresh lists in offline mode")
 	}
+	// Even a partial refresh can change the catalog; queue snippet changes
+	// before returning an error for one of the lists.
+	defer func() {
+		if err := a.SyncShell(ctx, nil); err != nil {
+			a.Log.Warn("could not sync shell snippets after refresh", "error", err)
+		}
+	}()
 	if len(names) == 0 {
 		for name := range a.State.Lists {
 			names = append(names, name)
@@ -170,12 +177,15 @@ func (a *App) AddList(ctx context.Context, spec string, opts AddListOptions) (Ad
 		FetchedAt: time.Now().UTC(),
 		Packages:  len(l.Packages),
 	}
+	if err := a.SyncShell(ctx, nil); err != nil {
+		a.Log.Warn("could not sync shell snippets after adding a list", "error", err)
+	}
 	return AddResult{Name: name, Origin: parsed.Origin, Packages: len(l.Packages)}, nil
 }
 
 // RemoveList deletes a list file and its metadata. The builtin list cannot be
 // removed. It returns how many installed packages came from the list.
-func (a *App) RemoveList(name string) (int, error) {
+func (a *App) RemoveList(ctx context.Context, name string) (int, error) {
 	meta, ok := a.State.Lists[name]
 	if !ok {
 		return 0, fmt.Errorf("unknown list %q", name)
@@ -193,6 +203,11 @@ func (a *App) RemoveList(name string) (int, error) {
 		return 0, err
 	}
 	delete(a.State.Lists, name)
+	// Installed packages from the removed list keep their binaries but their
+	// shell snippets now need an explicit removal approval.
+	if err := a.SyncShell(ctx, nil); err != nil {
+		a.Log.Warn("could not sync shell snippets after removing a list", "error", err)
+	}
 	return installed, nil
 }
 

@@ -58,6 +58,9 @@ func joinStrings(parts []string, sep string) string {
 
 func installOne(t *testing.T, a *App, name string, opt InstallOptions) ([]Result, error) {
 	t.Helper()
+	// Mirror the explicit `cpt install` command, which approves a first
+	// snippet but never a changed one.
+	opt.ApproveNewShell = true
 	var results []Result
 	err := a.WithLock(func() error {
 		var err error

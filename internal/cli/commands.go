@@ -16,6 +16,7 @@ import (
 	"github.com/SuSonicTH/cpt/internal/app"
 	"github.com/SuSonicTH/cpt/internal/cerr"
 	"github.com/SuSonicTH/cpt/internal/list"
+	"github.com/SuSonicTH/cpt/internal/shellinit"
 )
 
 func newFlagSet(name string) *flag.FlagSet {
@@ -68,7 +69,7 @@ func autoRefresh(ctx context.Context, a *app.App) {
 		return
 	}
 	if err := a.WithLock(func() error {
-		a.MaybeRefresh(ctx, false)
+		a.MaybeRefresh(ctx, false, true)
 		return nil
 	}); err != nil {
 		a.Log.Debug("list refresh skipped", "error", err)
@@ -195,6 +196,37 @@ func cmdInfo(ctx context.Context, a *app.App, args []string) error {
 	} else {
 		a.Out.Line("installed: no")
 	}
+	if info.Shell != nil {
+		switch {
+		case info.Shell.LastError != "" && info.Shell.SyncPending:
+			a.Out.Line("shell:     error: %s (sync pending)", shellinit.DisplayLine(info.Shell.LastError))
+		case info.Shell.LastError != "":
+			a.Out.Line("shell:     error: %s", shellinit.DisplayLine(info.Shell.LastError))
+		case info.Shell.SyncPending:
+			if a.Cfg.AllowShellPackages {
+				a.Out.Line("shell:     sync pending; cpt will retry")
+			} else {
+				a.Out.Line("shell:     unsynced; snippets are disabled")
+			}
+		case info.Shell.Removal:
+			live := "live snippet remains active"
+			if v := shellinit.VersionLabel(info.Shell.LiveVersion); v != "" {
+				live = "live " + v + " remains active"
+			}
+			a.Out.Line("shell:     removal pending (%s)", live)
+		case info.Shell.Pending && info.Shell.Live:
+			a.Out.Line("shell:     pending %s (live %s remains active, sha256:%s)",
+				shellinit.VersionLabel(info.Shell.PendingVersion), shellinit.VersionLabel(info.Shell.LiveVersion),
+				shellinit.ShortHash(info.Shell.PendingSHA256))
+		case info.Shell.Pending:
+			a.Out.Line("shell:     pending %s (no live snippet, sha256:%s)",
+				shellinit.VersionLabel(info.Shell.PendingVersion), shellinit.ShortHash(info.Shell.PendingSHA256))
+		case info.Shell.Rejected:
+			a.Out.Line("shell:     rejected until the snippet changes")
+		case info.Shell.Live:
+			a.Out.Line("shell:     approved %s (sha256:%s)", shellinit.VersionLabel(info.Shell.LiveVersion), shellinit.ShortHash(info.Shell.LiveSHA256))
+		}
+	}
 	if info.Latest != nil {
 		if info.Latest.Error != "" {
 			a.Out.Line("latest:    unavailable (%s)", info.Latest.Error)
@@ -223,13 +255,14 @@ func cmdInstall(ctx context.Context, a *app.App, args []string) error {
 	}
 	var results []app.Result
 	lockErr := a.WithLock(func() error {
-		a.MaybeRefresh(ctx, false)
+		a.MaybeRefresh(ctx, false, false)
 		var err error
 		results, err = a.Install(ctx, specs, app.InstallOptions{
-			Force:         *force,
-			ForceChecksum: *forceSum,
-			DryRun:        *dryRun,
-			SkipCurrent:   !*force,
+			Force:           *force,
+			ForceChecksum:   *forceSum,
+			DryRun:          *dryRun,
+			SkipCurrent:     !*force,
+			ApproveNewShell: true,
 		})
 		return err
 	})
@@ -246,7 +279,7 @@ func cmdUpdate(ctx context.Context, a *app.App, args []string) error {
 	}
 	var results []app.Result
 	lockErr := a.WithLock(func() error {
-		a.MaybeRefresh(ctx, false)
+		a.MaybeRefresh(ctx, false, false)
 		var err error
 		results, err = a.Update(ctx, fs.Args(), *force, *dryRun)
 		return err
@@ -398,7 +431,7 @@ func cmdDoctor(ctx context.Context, a *app.App, args []string) error {
 	tw := tabwriter.NewWriter(a.Out.Out, 2, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "CHECK\tSTATUS\tDETAIL")
 	for _, c := range checks {
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", c.Name, colorStatus(a, c.Status), c.Detail)
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", c.Name, colorStatus(a, c.Status), shellinit.DisplayLine(c.Detail))
 	}
 	_ = tw.Flush()
 	return silent(doctorErr)
@@ -521,7 +554,7 @@ func cmdListsRemove(ctx context.Context, a *app.App, args []string) error {
 	installed := 0
 	err := a.WithLock(func() error {
 		var err error
-		installed, err = a.RemoveList(args[0])
+		installed, err = a.RemoveList(ctx, args[0])
 		return err
 	})
 	if err != nil {

@@ -70,6 +70,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 	color := !g.NoColor && os.Getenv("NO_COLOR") == "" && isTTY(stdout)
 	a, err := app.Open(app.Options{
+		Context: ctx,
 		Root:    g.Root,
 		Offline: g.Offline,
 		Verbose: g.Verbose,
@@ -136,6 +137,10 @@ func dispatch(ctx context.Context, a *app.App, cmd string, args []string) error 
 		return cmdVerify(ctx, a, args)
 	case "doctor":
 		return cmdDoctor(ctx, a, args)
+	case "init":
+		return cmdInit(ctx, a, args)
+	case "shell", "shells":
+		return cmdShell(ctx, a, args)
 	case "lists", "list-sources":
 		return cmdLists(ctx, a, args)
 	default:

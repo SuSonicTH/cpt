@@ -16,6 +16,9 @@ Commands:
   unpin <package>          Remove a version pin
   verify [package...]      Re-hash installed binaries
   doctor                   Diagnose the installation
+  init <shell> [flags]     Print cptinit (bash, zsh, pwsh, powershell)
+                           --install / --uninstall edits an rc file; --file PATH
+  shell [subcommand]       Review shell snippets (list, diff, approve, reject)
   lists [subcommand]       Manage package lists (add, remove, refresh, show, lint)
   version                  Print version information
   help                     Show this help
@@ -40,4 +43,25 @@ Examples:
   cpt lists add github.com/acme/tools#main:ci/cpt.json
   cpt lists add https://example.com/cpt.json --name private
   cpt verify
+  eval "$(cpt init bash)"
+  cpt init bash --install
+  cpt shell diff fzf
+  cpt shell approve fzf
+`
+
+const shellUsage = `cpt shell — review and approve shell snippets
+
+Usage:
+  cpt shell                      Show snippet approval status
+  cpt shell list                 Show snippet approval status
+  cpt shell diff <package>       Show the pending change for one package
+  cpt shell approve <package...> Approve pending snippets
+  cpt shell approve --all        Approve every pending snippet
+  cpt shell reject <package...>  Discard pending snippets, keep the live ones
+  cpt shell reject --all         Discard every pending snippet
+  cpt shell reset <package...>   Clear a rejection and queue the snippet again
+  cpt shell reset --all          Clear every rejection
+
+Changed snippets are never sourced until approved. The previous approved
+snippet stays live in the meantime.
 `

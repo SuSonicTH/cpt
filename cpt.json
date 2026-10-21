@@ -45,6 +45,14 @@
           "windows/amd64": "fzf-{version}-windows_amd64.zip",
           "windows/arm64": "fzf-{version}-windows_arm64.zip"
         }
+      },
+      "shell": {
+        "bash": {
+          "env": { "FZF_DEFAULT_OPTS": "--height 40% --border" }
+        },
+        "pwsh": {
+          "env": { "FZF_DEFAULT_OPTS": "--height 40% --border" }
+        }
       }
     },
     {

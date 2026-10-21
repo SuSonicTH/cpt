@@ -133,6 +133,78 @@ func TestSlug(t *testing.T) {
 	}
 }
 
+func TestParseShellBlock(t *testing.T) {
+	doc := `{"schema":1,"name":"t","packages":[{"name":"a","source":{"type":"url","url":"https://x/{version}/a","bins":["a"]},"version":"1.0.0",
+	  "shell":{"bash":{"functions":"alias a='a'\n","env":{"A":"1"},"path":["/opt/a/bin"]},
+	           "pwsh":{"functions_url":"https://x/a.ps1","functions_sha256":"` + strings.Repeat("a", 64) + `"}}}]}`
+	if _, err := Parse([]byte(doc), "t"); err != nil {
+		t.Fatalf("valid shell block rejected: %v", err)
+	}
+}
+
+func TestParseRejectsVersionInjection(t *testing.T) {
+	doc := `{"schema":1,"name":"t","packages":[{"name":"a","version":"1.0\necho pwn","source":{"type":"url","url":"https://x/a"}}]}`
+	if _, err := Parse([]byte(doc), "t"); err == nil || !strings.Contains(err.Error(), "version") {
+		t.Fatalf("expected a version error, got %v", err)
+	}
+}
+
+func TestParseShellURLPolicy(t *testing.T) {
+	sha := strings.Repeat("a", 64)
+	doc := func(url string) string {
+		return `{"schema":1,"name":"t","packages":[{"name":"a","source":{"type":"url","url":"https://x/{version}/a"},"version":"1.0.0",
+		  "shell":{"bash":{"functions_url":"` + url + `","functions_sha256":"` + sha + `"}}}]}`
+	}
+	if _, err := Parse([]byte(doc("http://127.0.0.1:8080/s.sh")), "t"); err != nil {
+		t.Fatalf("loopback http should be accepted: %v", err)
+	}
+	if _, err := Parse([]byte(doc("http://example.com/s.sh")), "t"); err == nil {
+		t.Fatal("non-loopback http should be rejected")
+	}
+	if _, err := Parse([]byte(doc("https://example.com/s.sh")), "t"); err != nil {
+		t.Fatalf("https should be accepted: %v", err)
+	}
+}
+
+func TestParseShellPwshPathSeparators(t *testing.T) {
+	doc := func(paths string) string {
+		return `{"schema":1,"name":"t","packages":[{"name":"a","source":{"type":"url","url":"https://x/a"},"version":"1.0.0",
+		  "shell":{"pwsh":{"functions":"x","path":` + paths + `}}}]}`
+	}
+	if _, err := Parse([]byte(doc(`["C:\\Tools"]`)), "t"); err != nil {
+		t.Fatalf("Windows drive path rejected: %v", err)
+	}
+	for _, paths := range []string{`["C:\\a:b"]`, `["a;b"]`} {
+		if _, err := Parse([]byte(doc(paths)), "t"); err == nil {
+			t.Errorf("ambiguous path %s was accepted", paths)
+		}
+	}
+}
+
+func TestParseRejectsBadShellBlocks(t *testing.T) {
+	const pkg = `{"schema":1,"name":"t","packages":[{"name":"a","source":{"type":"url","url":"https://x/{version}/a"},"version":"1.0.0","shell":%s}]}`
+	cases := map[string]string{
+		"empty shell":       `{}`,
+		"empty flavor":      `{"bash":{}}`,
+		"both sources":      `{"bash":{"functions":"x","functions_url":"https://x/a"}}`,
+		"url without hash":  `{"bash":{"functions_url":"https://x/a"}}`,
+		"short hash":        `{"bash":{"functions_url":"https://x/a","functions_sha256":"abc"}}`,
+		"hash without url":  `{"bash":{"functions":"x","functions_sha256":"` + strings.Repeat("a", 64) + `"}}`,
+		"bad env name":      `{"bash":{"functions":"x","env":{"BAD-NAME":"1"}}}`,
+		"newline env value": `{"bash":{"functions":"x","env":{"A":"a\nb"}}}`,
+		"empty path":        `{"bash":{"functions":"x","path":[""]}}`,
+		"colon in path":     `{"bash":{"functions":"x","path":["/a:b"]}}`,
+		"init marker":       `{"bash":{"functions":"# >>> cpt:init"}}`,
+		"bad url":           `{"bash":{"functions_url":"ftp://x/a","functions_sha256":"` + strings.Repeat("a", 64) + `"}}`,
+	}
+	for name, shell := range cases {
+		doc := strings.Replace(pkg, "%s", shell, 1)
+		if _, err := Parse([]byte(doc), "t"); err == nil {
+			t.Errorf("%s: expected a validation error", name)
+		}
+	}
+}
+
 func TestPlatformsSorted(t *testing.T) {
 	p := Package{Source: Source{Asset: map[string]string{
 		"windows/amd64": "c",

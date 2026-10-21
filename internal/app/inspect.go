@@ -163,6 +163,7 @@ type Info struct {
 	Platforms   []string   `json:"platforms,omitempty"`
 	Installed   *Installed `json:"installed,omitempty"`
 	Latest      *Latest    `json:"latest,omitempty"`
+	Shell       *ShellInfo `json:"shell,omitempty"`
 }
 
 // Installed describes the locally installed copy.
@@ -219,6 +220,10 @@ func (a *App) Detail(ctx context.Context, name string) (*Info, error) {
 			InstalledAt: p.InstalledAt.Format("2006-01-02 15:04:05"),
 			Bins:        p.Bins,
 		}
+	}
+	if sh := a.State.Shell[name]; sh != nil {
+		si := shellInfoFor(name, sh)
+		info.Shell = &si
 	}
 	if !a.Offline {
 		res, err := resolve.Package(ctx, a.Prober, entry, platform.Current(), resolve.Options{})

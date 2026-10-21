@@ -25,6 +25,7 @@ import (
 
 // Options configures opening an App.
 type Options struct {
+	Context context.Context
 	Root    string
 	Offline bool
 	Verbose bool
@@ -102,6 +103,13 @@ func Open(opts Options) (*App, error) {
 	if err := a.loadState(); err != nil {
 		return nil, err
 	}
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := a.ReconcileInit(ctx); err != nil {
+		logger.Warn("could not reconcile shell init files", "error", err)
+	}
 	return a, nil
 }
 
@@ -120,20 +128,35 @@ func (a *App) loadState() error {
 	if err != nil {
 		return err
 	}
-	if _, ok := st.Lists["core"]; !ok {
-		packages := 0
-		if l, err := list.Parse(cpt.BuiltinList(), "builtin"); err == nil {
-			packages = len(l.Packages)
-		}
-		st.Lists["core"] = &state.List{
-			Origin:    cpt.BuiltinListOrigin,
-			Builtin:   true,
-			FetchedAt: time.Now().UTC(),
-			Packages:  packages,
-		}
-	}
+	a.ensureCoreList(st)
 	a.State = st
 	return nil
+}
+
+func (a *App) ensureCoreList(st *state.State) {
+	if _, ok := st.Lists["core"]; ok {
+		return
+	}
+	packages := 0
+	if l, err := list.Parse(cpt.BuiltinList(), "builtin"); err == nil {
+		packages = len(l.Packages)
+	}
+	st.Lists["core"] = &state.List{
+		Origin:    cpt.BuiltinListOrigin,
+		Builtin:   true,
+		FetchedAt: time.Now().UTC(),
+		Packages:  packages,
+	}
+}
+
+// reloadConfig picks up edits made while a long operation was running.
+func (a *App) reloadConfig() {
+	cfg, err := config.Load(a.Paths.ConfigFile)
+	if err != nil {
+		a.Log.Warn("could not reload config", "error", err)
+		return
+	}
+	a.Cfg = cfg
 }
 
 // WithLock runs fn while holding the state lock, reloading state first and
@@ -153,7 +176,26 @@ func (a *App) WithLock(fn func() error) error {
 		_ = os.MkdirAll(a.Paths.Tmp, 0o755)
 	}
 	fnErr := fn()
+	// Apply a config change made while this operation was running before
+	// saving, so the kill switch also wins over shell decisions made by fn.
+	a.reloadConfig()
+	if !a.Cfg.AllowShellPackages {
+		if cat, catErr := a.Catalog(); catErr == nil {
+			a.markShellDirty(cat)
+		} else {
+			a.Log.Warn("could not inspect lists while shell packages are disabled", "error", catErr)
+			a.markShellStateDirty()
+		}
+	}
 	saveErr := a.State.Save(a.Paths.StateFile)
+	// Regenerate even when state could not be saved: the kill switch removes
+	// snippets based on config alone and is security-relevant.
+	if initErr := a.RegenerateInit(); initErr != nil {
+		// Report the stale script but do not turn an otherwise successful
+		// pin/list/install into a failure.
+		a.Log.Error("could not write shell init files", "error", initErr)
+		a.Out.Warnf("could not update shell init files: %v", initErr)
+	}
 	if fnErr != nil {
 		if saveErr != nil {
 			a.Log.Error("could not save state after failure", "error", saveErr)
@@ -229,8 +271,10 @@ func (a *App) ListsStale() bool {
 	return false
 }
 
-// MaybeRefresh refreshes stale lists, logging rather than failing.
-func (a *App) MaybeRefresh(ctx context.Context, force bool) {
+// MaybeRefresh refreshes stale lists, logging rather than failing. syncShell
+// controls whether installed shell snippets are re-resolved; install and
+// update skip it here because they sync after their own state mutation.
+func (a *App) MaybeRefresh(ctx context.Context, force, syncShell bool) {
 	if a.Offline {
 		return
 	}
@@ -253,6 +297,11 @@ func (a *App) MaybeRefresh(ctx context.Context, force bool) {
 		if err := a.refreshList(ctx, name, meta, force); err != nil {
 			a.Log.Warn("list refresh failed", "list", name, "error", err)
 			a.Out.Warnf("could not refresh list %s: %v", name, err)
+		}
+	}
+	if syncShell {
+		if err := a.SyncShell(ctx, nil); err != nil {
+			a.Log.Warn("could not sync shell snippets after refresh", "error", err)
 		}
 	}
 }

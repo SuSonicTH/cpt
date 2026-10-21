@@ -6,7 +6,7 @@ GitHub releases) using declarative JSON package lists, installs them into a flat
 `~/.cpt/bin`, and can freeze a chosen set of tools into a single native binary that sets
 up a working `cpt` environment on another machine.
 
-Status: design accepted, not yet implemented.
+Status: design accepted; M0–M2 implemented (core, CLI, shell integration).
 
 ---
 
@@ -45,6 +45,7 @@ Status: design accepted, not yet implemented.
 │   └── acme.lock.json         # snapshot of exact versions+hashes from the last resolve
 ├── cache/
 │   ├── probe/<hash>.json      # resolved tag per repo, short TTL
+│   ├── shell/<sha256>         # verified URL shell snippets
 │   ├── self/cpt_1.2.0_linux_arm64   # bundle base binaries
 │   └── downloads/<sha256>.<ext>     # content-addressed, optional reuse
 ├── bundles/
@@ -170,7 +171,19 @@ Rules:
       "readonly": false
     }
   },
-  "shell": { "fzf": { "snippet_sha256": "...", "approved": true } }
+  "shell": {
+    "fzf": {
+      "snippet_sha256": "...",
+      "approved": false,
+      "live": { "version": "0.74.5", "bash": "export FZF_DEFAULT_OPTS='...'" },
+      "pending": { "version": "0.75.0", "bash": "..." },
+      "pending_sha256": "...",
+      "rejected_sha256": "",
+      "last_error": "",
+      "sync_pending": false,
+      "sync_attempt": "2026-10-21T10:00:00Z"
+    }
+  }
 }
 ```
 
@@ -264,7 +277,14 @@ cpt doctor                            # PATH, conflicts, stale entries, permissi
 cpt lists add https://raw.githubusercontent.com/acme/tools/main/cpt.json --name acme
 cpt lists add github.com/acme/tools#main:ci/cpt.json
 cpt lists refresh --force
+cpt init bash                         # print cptinit.sh
 cpt init bash --install               # marker block in .bashrc
+cpt init bash --uninstall             # remove the marker block
+cpt init pwsh --install --file PATH   # explicit startup file
+cpt shell                             # snippet approval status
+cpt shell diff fzf                    # pending change for one package
+cpt shell approve fzf                 # promote a pending snippet
+cpt shell reject --all                # discard every pending change
 cpt bundle create devbox --packages fzf,jq,rg --target linux/arm64 --frozen
 cpt bundle rebuild devbox
 cpt self-update
@@ -305,6 +325,10 @@ export FZF_DEFAULT_OPTS='--height 40% --border'
 - Snippets can be inline (`functions` plus an `env` map) or referenced by
   `functions_url` plus `functions_sha256`. URL snippets are cached and hashed like
   binaries.
+- Removing a `shell` block (or its list) queues a removal with an empty pending
+  body; the previous snippet stays live until the removal is approved or
+  rejected. A rejection stores the candidate hash so it is not offered again
+  until the list-provided body changes (`cpt shell reset` clears it).
 - Rendering order is deterministic (sorted by package name) so diffs stay small.
 
 ---
@@ -477,7 +501,8 @@ internal/fetch/          download, progress, checksum discovery/parsing
 internal/archive/        tar.gz/xz/zst/zip/raw, safe extraction, bin selection
 internal/install/        atomic flat-bin install, ownership, GC
 internal/state/          state.json, locking, migrations
-internal/shellinit/      bash/pwsh rendering, rc marker blocks, approval
+internal/shellinit/      bash/pwsh rendering, rc marker blocks, snippet resolution
+internal/app/shell.go    approval state machine and cptinit regeneration
 internal/bundle/         footer, build, run/unpack, self-truncate
 internal/tui/            bubbletea model, tabs, views
 internal/progress/       shared event bus (TUI and CLI renderers)

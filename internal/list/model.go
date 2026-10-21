@@ -137,6 +137,11 @@ func (p *Package) Validate() error {
 	if !ValidName(p.Name) {
 		return fmt.Errorf("name must match %s", nameRE)
 	}
+	if p.Version != "" {
+		if err := ValidateVersion(p.Version); err != nil {
+			return err
+		}
+	}
 	switch p.Source.Type {
 	case "github":
 		parts := strings.Split(p.Source.Repo, "/")
@@ -183,6 +188,11 @@ func (p *Package) Validate() error {
 	for _, c := range p.Source.Checksums {
 		if strings.TrimSpace(c) == "" {
 			return fmt.Errorf("empty checksum candidate")
+		}
+	}
+	if p.Shell != nil {
+		if err := p.Shell.Validate(); err != nil {
+			return err
 		}
 	}
 	return nil

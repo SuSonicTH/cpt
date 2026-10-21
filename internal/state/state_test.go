@@ -55,6 +55,31 @@ func TestRemoveClearsOwnership(t *testing.T) {
 	}
 }
 
+func TestRemoveClearsShellState(t *testing.T) {
+	st := New()
+	st.Packages["a"] = &Package{Bins: map[string]string{}}
+	st.Shell["a"] = &Shell{Live: &ShellSnippet{Bash: "export A=1\n"}, Approved: true}
+	st.Remove("a")
+	if _, ok := st.Shell["a"]; ok {
+		t.Fatal("shell state survived package removal")
+	}
+}
+
+func TestLoadKeepsRejectedSnippetState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	doc := `{"schema":1,"shell":{"a":{"approved":false,"rejected_sha256":"abc"}}}`
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Shell["a"] == nil || st.Shell["a"].RejectedSHA256 != "abc" {
+		t.Fatalf("rejection marker was dropped: %+v", st.Shell)
+	}
+}
+
 func TestLockContention(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".lock")
 	l1, err := Acquire(path, time.Second)
