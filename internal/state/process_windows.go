@@ -21,8 +21,13 @@ const (
 
 // processAlive reports whether pid is running, using the Win32 process API.
 func processAlive(pid int) bool {
-	h, _, _ := procOpenProcess.Call(processQueryLimitedInformation, 0, uintptr(uint32(pid)))
+	h, _, callErr := procOpenProcess.Call(processQueryLimitedInformation, 0, uintptr(uint32(pid)))
 	if h == 0 {
+		// Access denied means the process exists under another account; never
+		// treat that as dead, or a live lock could be stolen.
+		if errno, ok := callErr.(syscall.Errno); ok && errno == 5 { // ERROR_ACCESS_DENIED
+			return true
+		}
 		return false
 	}
 	defer procCloseHandle.Call(h)

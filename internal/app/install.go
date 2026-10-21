@@ -171,9 +171,7 @@ func (a *App) Remove(ctx context.Context, names []string, force bool) ([]Result,
 		for _, d := range plans[i] {
 			if d.exists {
 				if err := os.Remove(d.path); err != nil && !os.IsNotExist(err) {
-					// Record the progress made so state matches the disk.
-					delete(p.Bins, d.bin)
-					delete(a.State.Provides, d.bin)
+					// Keep the failed bin tracked so a retry can remove it.
 					return results, fmt.Errorf("remove %s: %w", d.path, err)
 				}
 			}
@@ -339,18 +337,26 @@ func (a *App) installRequests(ctx context.Context, reqs []request, opt InstallOp
 
 // adoptLatestTag refreshes the resolved tag after a latest/download fallback,
 // so state and checksum candidates refer to the bytes actually downloaded.
-func (a *App) adoptLatestTag(ctx context.Context, res *resolve.Resolution) {
+func (a *App) adoptLatestTag(ctx context.Context, res *resolve.Resolution) error {
 	probe := *a.Prober
 	probe.NoCache = true
 	latest, err := probe.Latest(ctx, res.Repo)
-	if err != nil || latest.Tag == "" || latest.Tag == res.Tag {
-		return
+	if err != nil {
+		return fmt.Errorf("resolve the final tag after fallback: %w", err)
+	}
+	if latest.Tag == "" {
+		return fmt.Errorf("resolve the final tag after fallback: empty tag for %s", res.Repo)
+	}
+	res.Canonical = latest.Canonical
+	res.SourceID = "github:" + latest.Canonical
+	if latest.Tag == res.Tag {
+		return nil
 	}
 	res.Tag = latest.Tag
 	res.Version = resolve.VersionOf(latest.Tag, res.Entry.Source.VersionStrip)
-	res.Canonical = latest.Canonical
 	res.URL = a.Prober.ReleaseURL(latest.Canonical, latest.Tag, res.Asset)
 	res.Checksums = resolve.ChecksumCandidates(res.Entry, &probe, res)
+	return nil
 }
 
 func (a *App) stage(ctx context.Context, req request, plat platform.Platform, previous map[string]*state.Package, opt InstallOptions) *staged {
@@ -429,7 +435,10 @@ func (a *App) stage(ctx context.Context, req request, plat platform.Platform, pr
 			if altSHA, _, altErr := down.To(ctx, alt, assetPath, res.Name); altErr == nil {
 				sha, err = altSHA, nil
 				res.URL = alt
-				a.adoptLatestTag(ctx, res)
+				if tagErr := a.adoptLatestTag(ctx, res); tagErr != nil {
+					st.err = fmt.Errorf("%s: %w", res.Name, tagErr)
+					return st
+				}
 			}
 		}
 	}

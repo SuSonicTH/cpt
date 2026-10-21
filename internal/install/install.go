@@ -15,6 +15,11 @@ import (
 	"github.com/SuSonicTH/cpt/internal/state"
 )
 
+// tmpDirName holds staging and backup files inside the bin directory. It is
+// cleaned at the start of every install and is on the same filesystem as the
+// destinations, so renames stay atomic.
+const tmpDirName = ".cpt-tmp"
+
 // Manager installs binaries and maintains ownership records.
 type Manager struct {
 	BinDir string
@@ -31,11 +36,20 @@ type target struct {
 }
 
 // Place installs bins into the bin directory and updates ownership in State.
-// All conflicts are detected before any file is written. It returns the
-// installed binary names mapped to their content hashes.
+// All conflicts are detected before any file is written. Existing binaries are
+// backed up so a late failure can restore them.
 func (m *Manager) Place(name string, bins []archive.Bin) (map[string]string, error) {
 	if err := os.MkdirAll(m.BinDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create bin directory: %w", err)
+	}
+	tmpDir := filepath.Join(m.BinDir, tmpDirName)
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create staging directory: %w", err)
+	}
+	if entries, err := os.ReadDir(tmpDir); err == nil {
+		for _, e := range entries {
+			_ = os.RemoveAll(filepath.Join(tmpDir, e.Name()))
+		}
 	}
 
 	targets, err := m.preflight(name, bins)
@@ -43,7 +57,6 @@ func (m *Manager) Place(name string, bins []archive.Bin) (map[string]string, err
 		return nil, err
 	}
 
-	// Stage every copy first so a failure cannot leave a half-installed package.
 	temps := make([]string, 0, len(targets))
 	cleanup := func() {
 		for _, tmp := range temps {
@@ -53,7 +66,7 @@ func (m *Manager) Place(name string, bins []archive.Bin) (map[string]string, err
 		}
 	}
 	for _, t := range targets {
-		tmp, err := stageCopy(t.src, m.BinDir)
+		tmp, err := stageCopy(t.src, tmpDir)
 		if err != nil {
 			cleanup()
 			return nil, err
@@ -61,13 +74,10 @@ func (m *Manager) Place(name string, bins []archive.Bin) (map[string]string, err
 		temps = append(temps, tmp)
 	}
 
-	installed := make(map[string]string, len(targets))
-
-	// Preserve existing binaries so a late failure can restore them.
 	backups := make([]string, len(targets))
 	for i, t := range targets {
 		if info, err := os.Lstat(t.dest); err == nil && info.Mode().IsRegular() {
-			b, err := stageCopy(t.dest, m.BinDir)
+			b, err := stageCopy(t.dest, tmpDir)
 			if err != nil {
 				cleanup()
 				for _, prev := range backups {
@@ -80,6 +90,7 @@ func (m *Manager) Place(name string, bins []archive.Bin) (map[string]string, err
 			backups[i] = b
 		}
 	}
+
 	removeBackups := func() {
 		for _, b := range backups {
 			if b != "" {
@@ -88,26 +99,42 @@ func (m *Manager) Place(name string, bins []archive.Bin) (map[string]string, err
 		}
 	}
 	var committed []string
-	rollback := func() {
+	rollback := func() error {
 		cleanup()
 		for _, path := range committed {
 			_ = os.Remove(path)
 		}
+		var restoreFailed []string
 		for i, b := range backups {
-			if b != "" {
-				_ = os.Rename(b, targets[i].dest)
+			if b == "" {
+				continue
 			}
+			if err := os.Rename(b, targets[i].dest); err != nil {
+				restoreFailed = append(restoreFailed, fmt.Sprintf("%s (backup kept at %s)", targets[i].dest, b))
+				continue
+			}
+			backups[i] = ""
 		}
+		if len(restoreFailed) > 0 {
+			return fmt.Errorf("could not restore %s", joinComma(restoreFailed))
+		}
+		return nil
 	}
+
+	installed := make(map[string]string, len(targets))
 	for i, t := range targets {
 		if err := os.Rename(temps[i], t.dest); err != nil {
 			if runtime.GOOS != "windows" {
-				rollback()
+				if rbErr := rollback(); rbErr != nil {
+					return nil, fmt.Errorf("install %s: %w; %v", t.name, err, rbErr)
+				}
 				return nil, fmt.Errorf("install %s: %w", t.name, err)
 			}
 			alt := t.dest + ".new"
 			if err2 := os.Rename(temps[i], alt); err2 != nil {
-				rollback()
+				if rbErr := rollback(); rbErr != nil {
+					return nil, fmt.Errorf("install %s: %w; %v", t.name, err, rbErr)
+				}
 				return nil, fmt.Errorf("install %s: %w", t.name, err)
 			}
 			m.Warnings = append(m.Warnings, fmt.Sprintf("%s is in use; new version written to %s", t.name, filepath.Base(alt)))
@@ -121,12 +148,17 @@ func (m *Manager) Place(name string, bins []archive.Bin) (map[string]string, err
 
 		hash, err := FileSHA256(t.dest)
 		if err != nil {
-			rollback()
+			if rbErr := rollback(); rbErr != nil {
+				return nil, fmt.Errorf("hash %s: %w; %v", t.name, err, rbErr)
+			}
 			return nil, err
 		}
 		installed[t.name] = hash
 	}
 	removeBackups()
+	if entries, err := os.ReadDir(tmpDir); err == nil && len(entries) == 0 {
+		_ = os.Remove(tmpDir)
+	}
 
 	for bin := range installed {
 		if prev, ok := m.State.Owner(bin); ok && prev != name {
@@ -193,7 +225,7 @@ func stageCopy(src, dir string) (string, error) {
 	}
 	defer in.Close()
 
-	f, err := os.CreateTemp(dir, ".cpt-stage-*")
+	f, err := os.CreateTemp(dir, "stage-*")
 	if err != nil {
 		return "", fmt.Errorf("create staging file in %s: %w", dir, err)
 	}
@@ -217,6 +249,17 @@ func stageCopy(src, dir string) (string, error) {
 		return "", err
 	}
 	return tmp, nil
+}
+
+func joinComma(parts []string) string {
+	out := ""
+	for i, p := range parts {
+		if i > 0 {
+			out += ", "
+		}
+		out += p
+	}
+	return out
 }
 
 // FileSHA256 returns the hex digest of a file.

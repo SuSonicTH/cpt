@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/SuSonicTH/cpt/internal/cerr"
@@ -515,5 +516,48 @@ func TestUpdateActuallyUpdatesUnpinnedPackage(t *testing.T) {
 	}
 	if a.State.Packages["tool"].Version != "2.0.0" {
 		t.Fatalf("state version = %q", a.State.Packages["tool"].Version)
+	}
+}
+
+func TestRemoveFailureKeepsBinaryTracked(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("relies on a read-only directory denying deletion")
+	}
+	content := tarGz(t, map[string]string{"mytool": "x"})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(content) }))
+	defer srv.Close()
+
+	a, root := fixture(t, urlPackage("mytool", srv.URL+"/t.tar.gz", "mytool"))
+	if _, err := installOne(t, a, "mytool", InstallOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(root, "bin")
+	if err := os.Chmod(binDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.WithLock(func() error {
+		_, err := a.Remove(context.Background(), []string{"mytool"}, false)
+		return err
+	}); err == nil {
+		t.Fatal("expected removal to fail on a read-only directory")
+	}
+	if p := a.State.Packages["mytool"]; p == nil || p.Bins["mytool"] == "" {
+		t.Fatalf("failed removal dropped tracking: %+v", a.State.Packages["mytool"])
+	}
+	if owner := a.State.Provides["mytool"]; owner != "mytool" {
+		t.Fatalf("ownership lost after failed removal: %q", owner)
+	}
+
+	if err := os.Chmod(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.WithLock(func() error {
+		_, err := a.Remove(context.Background(), []string{"mytool"}, false)
+		return err
+	}); err != nil {
+		t.Fatalf("retry remove: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(binDir, "mytool")); !os.IsNotExist(err) {
+		t.Fatalf("binary still present after retry: %v", err)
 	}
 }
