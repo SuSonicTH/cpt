@@ -54,7 +54,7 @@ func TestDiscoverFallsThroughMissingCandidates(t *testing.T) {
 		{Name: "tool.tar.gz.sha256", URL: srv.URL + "/tool.tar.gz.sha256"},
 		{Name: "SHA256SUMS", URL: srv.URL + "/SHA256SUMS"},
 	}
-	m, err := Discover(context.Background(), srv.Client(), cands, "tool.tar.gz")
+	m, err := Discover(context.Background(), srv.Client(), cands, "tool.tar.gz", 1)
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestDiscoverFallsThroughMissingCandidates(t *testing.T) {
 func TestDiscoverReportsMissing(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	defer srv.Close()
-	_, err := Discover(context.Background(), srv.Client(), []Candidate{{Name: "sums", URL: srv.URL + "/sums"}}, "x")
+	_, err := Discover(context.Background(), srv.Client(), []Candidate{{Name: "sums", URL: srv.URL + "/sums"}}, "x", 1)
 	if err == nil || !strings.Contains(err.Error(), "no checksum") {
 		t.Fatalf("expected a no-checksum error, got %v", err)
 	}

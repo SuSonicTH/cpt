@@ -14,6 +14,7 @@ import (
 	"github.com/SuSonicTH/cpt/internal/archive"
 	"github.com/SuSonicTH/cpt/internal/cerr"
 	"github.com/SuSonicTH/cpt/internal/fetch"
+	"github.com/SuSonicTH/cpt/internal/httpc"
 	"github.com/SuSonicTH/cpt/internal/install"
 	"github.com/SuSonicTH/cpt/internal/list"
 	"github.com/SuSonicTH/cpt/internal/platform"
@@ -127,6 +128,7 @@ func (a *App) Remove(ctx context.Context, names []string, force bool) ([]Result,
 	if len(names) == 0 {
 		return nil, cerr.New(cerr.Usage, "no packages given")
 	}
+	names = dedupe(names)
 	for _, name := range names {
 		if _, ok := a.State.Packages[name]; !ok {
 			return nil, fmt.Errorf("%s is not installed", name)
@@ -135,17 +137,26 @@ func (a *App) Remove(ctx context.Context, names []string, force bool) ([]Result,
 	var results []Result
 	for _, name := range names {
 		p := a.State.Packages[name]
+		if p == nil {
+			continue
+		}
 		for bin, want := range p.Bins {
+			owner, ok := a.State.Owner(bin)
+			if !ok || owner != name {
+				continue
+			}
 			path := filepath.Join(a.BinDir(), bin)
-			if got, err := install.FileSHA256(path); err == nil && want != "" && got != want && !force {
-				a.Out.Warnf("%s was modified since installation", path)
+			got, err := install.FileSHA256(path)
+			if err == nil && want != "" && got != want && !force {
+				return results, fmt.Errorf("%s was modified since installation; use --force to remove it", path)
+			}
+			if err != nil && !os.IsNotExist(err) {
+				return results, fmt.Errorf("hash %s: %w", path, err)
 			}
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				return results, fmt.Errorf("remove %s: %w", path, err)
 			}
-			if owner, ok := a.State.Owner(bin); ok && owner == name {
-				delete(a.State.Provides, bin)
-			}
+			delete(a.State.Provides, bin)
 		}
 		a.State.Remove(name)
 		results = append(results, Result{Name: name, Version: p.Version, Action: "removed"})
@@ -305,19 +316,27 @@ func (a *App) installRequests(ctx context.Context, reqs []request, opt InstallOp
 }
 
 func (a *App) stage(ctx context.Context, req request, plat platform.Platform, previous map[string]*state.Package, opt InstallOptions) *staged {
-	res, err := resolve.Package(ctx, a.Prober, req.entry, plat, resolve.Options{CLIVersion: req.version, UserPin: req.pin})
+	resolveOpt := resolve.Options{CLIVersion: req.version, UserPin: req.pin}
+	if prev := previous[req.entry.Pkg.Name]; prev != nil {
+		resolveOpt.InstalledTag = prev.Tag
+		resolveOpt.InstalledVer = prev.Version
+	}
+	res, err := resolve.Package(ctx, a.Prober, req.entry, plat, resolveOpt)
 	if err != nil {
 		return &staged{err: fmt.Errorf("%s: %w", req.entry.Pkg.Name, err)}
 	}
 	st := &staged{res: res}
 	if prev := previous[res.Name]; prev != nil && opt.SkipCurrent && prev.Version == res.Version && !opt.Force {
-		st.action = "up-to-date"
-		if opt.DryRun {
+		if a.installedIntact(prev) {
 			st.action = "up-to-date"
+			return st
 		}
-		return st
 	}
 	if opt.DryRun {
+		return st
+	}
+	if a.Offline {
+		st.err = fmt.Errorf("%s: offline mode cannot download %s", res.Name, res.URL)
 		return st
 	}
 
@@ -330,6 +349,15 @@ func (a *App) stage(ctx context.Context, req request, plat platform.Platform, pr
 	assetPath := filepath.Join(dir, safeAssetName(res.Asset))
 	down := &fetch.Downloader{Client: a.Client, Attempts: max(1, a.Cfg.HTTP.Retries)}
 	sha, _, err := down.To(ctx, res.URL, assetPath, res.Name)
+	if err != nil && errors.Is(err, httpc.ErrNotFound) && res.Repo != "" {
+		alt := a.Prober.LatestAssetURL(res.Repo, res.Asset)
+		if alt != res.URL {
+			if altSHA, _, altErr := down.To(ctx, alt, assetPath, res.Name); altErr == nil {
+				sha, err = altSHA, nil
+				res.URL = alt
+			}
+		}
+	}
 	if err != nil {
 		st.err = fmt.Errorf("%s: %w", res.Name, err)
 		return st
@@ -349,7 +377,11 @@ func (a *App) stage(ctx context.Context, req request, plat platform.Platform, pr
 		st.err = fmt.Errorf("%s: %w", res.Name, err)
 		return st
 	}
-	bins, err := archive.Select(files, extractDir, req.entry.Pkg.Source.Bins, plat.IsWindows(), res.Name)
+	bins, err := archive.Select(files, extractDir, archive.SelectOptions{
+		Bins:        req.entry.Pkg.Source.Bins,
+		Windows:     plat.IsWindows(),
+		StripPrefix: stripPrefix(req.entry.Pkg.Source.StripPrefix),
+	})
 	if err != nil {
 		st.err = fmt.Errorf("%s: %w", res.Name, err)
 		return st
@@ -358,12 +390,22 @@ func (a *App) stage(ctx context.Context, req request, plat platform.Platform, pr
 	return st
 }
 
+// installedIntact reports whether every binary recorded for p still exists.
+func (a *App) installedIntact(p *state.Package) bool {
+	for bin := range p.Bins {
+		if _, err := os.Stat(filepath.Join(a.BinDir(), bin)); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
 func (a *App) verify(ctx context.Context, res *resolve.Resolution, sha string, previous map[string]*state.Package, opt InstallOptions) (string, string, error) {
 	policy := a.Cfg.ChecksumPolicy
 	if policy == "off" {
 		return "none", "", nil
 	}
-	match, err := fetch.Discover(ctx, a.Client, res.Checksums, res.Asset)
+	match, err := fetch.Discover(ctx, a.Client, res.Checksums, res.Asset, max(1, a.Cfg.HTTP.Retries))
 	switch {
 	case err == nil:
 		if !strings.EqualFold(match.Hash, sha) {
@@ -530,6 +572,19 @@ func firstResultError(results []Result) error {
 	return nil
 }
 
+func dedupe(names []string) []string {
+	seen := make(map[string]bool, len(names))
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
+}
+
 // ResultsError returns the first per-package failure, if any.
 func ResultsError(results []Result) error { return firstResultError(results) }
 
@@ -540,6 +595,13 @@ func splitSpec(spec string) (name, version string) {
 		return strings.TrimSpace(spec[:i]), strings.TrimSpace(spec[i+1:])
 	}
 	return spec, ""
+}
+
+func stripPrefix(v *bool) bool {
+	if v == nil {
+		return true
+	}
+	return *v
 }
 
 func safeAssetName(asset string) string {

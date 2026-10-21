@@ -100,6 +100,30 @@ func (s *State) ensureMaps() {
 	if s.Shell == nil {
 		s.Shell = map[string]*Shell{}
 	}
+	for name, p := range s.Packages {
+		if p == nil {
+			delete(s.Packages, name)
+			continue
+		}
+		if p.Bins == nil {
+			p.Bins = map[string]string{}
+		}
+	}
+	for name, l := range s.Lists {
+		if l == nil {
+			delete(s.Lists, name)
+		}
+	}
+	for name, sh := range s.Shell {
+		if sh == nil {
+			delete(s.Shell, name)
+		}
+	}
+	for bin, owner := range s.Provides {
+		if owner == "" {
+			delete(s.Provides, bin)
+		}
+	}
 }
 
 // Save writes state atomically.

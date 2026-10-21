@@ -15,6 +15,7 @@ import (
 
 	"github.com/SuSonicTH/cpt/internal/app"
 	"github.com/SuSonicTH/cpt/internal/cerr"
+	"github.com/SuSonicTH/cpt/internal/list"
 )
 
 func newFlagSet(name string) *flag.FlagSet {
@@ -23,14 +24,59 @@ func newFlagSet(name string) *flag.FlagSet {
 	return fs
 }
 
+// parseFlags permutes flags before positional arguments, so that
+// "install fzf --force" behaves like "install --force fzf".
+func parseFlags(fs *flag.FlagSet, args []string) error {
+	var flags, positional []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		if len(arg) > 1 && arg[0] == '-' && arg != "-" {
+			flags = append(flags, arg)
+			if !strings.Contains(arg, "=") {
+				name := strings.TrimLeft(arg, "-")
+				if f := fs.Lookup(name); f != nil {
+					if bf, ok := f.Value.(interface{ IsBoolFlag() bool }); !ok || !bf.IsBoolFlag() {
+						if i+1 < len(args) {
+							i++
+							flags = append(flags, args[i])
+						}
+					}
+				}
+			}
+			continue
+		}
+		positional = append(positional, arg)
+	}
+	return fs.Parse(append(flags, positional...))
+}
+
+// autoRefresh refreshes stale lists for read-only commands. Failures are not
+// fatal; the cached lists are still usable.
+func autoRefresh(ctx context.Context, a *app.App) {
+	if a.Offline {
+		return
+	}
+	if err := a.WithLock(func() error {
+		a.MaybeRefresh(ctx, false)
+		return nil
+	}); err != nil {
+		a.Log.Debug("list refresh skipped", "error", err)
+	}
+}
+
 func cmdList(ctx context.Context, a *app.App, args []string) error {
 	fs := newFlagSet("list")
 	installed := fs.Bool("installed", false, "show installed packages")
 	available := fs.Bool("available", false, "show packages that are not installed")
 	updates := fs.Bool("updates", false, "show packages with updates")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return cerr.New(cerr.Usage, "%v", err)
 	}
+	autoRefresh(ctx, a)
 	rows, err := a.Rows(ctx, app.ListOptions{Installed: *installed, Available: *available, Updates: *updates})
 	if err != nil {
 		return err
@@ -46,6 +92,7 @@ func cmdSearch(ctx context.Context, a *app.App, args []string) error {
 	if len(args) == 0 {
 		return cerr.New(cerr.Usage, "search needs a query")
 	}
+	autoRefresh(ctx, a)
 	rows, err := a.Search(ctx, strings.Join(args, " "))
 	if err != nil {
 		return err
@@ -75,6 +122,9 @@ func printRows(a *app.App, rows []app.Row, withLatest bool) {
 		if r.Conflict {
 			status = "conflict"
 		}
+		if r.Error != "" {
+			status = "error"
+		}
 		row := []string{r.Name, r.Version, colorStatus(a, status), r.List, r.Description}
 		if withLatest {
 			row = []string{r.Name, r.Version, r.Latest, colorStatus(a, status), r.List, r.Description}
@@ -85,15 +135,20 @@ func printRows(a *app.App, rows []app.Row, withLatest bool) {
 	if withLatest {
 		a.Out.Infof("\n* pinned")
 	}
+	for _, r := range rows {
+		if r.Error != "" {
+			a.Out.Warnf("%s: %s", r.Name, r.Error)
+		}
+	}
 }
 
 func colorStatus(a *app.App, status string) string {
 	switch status {
-	case "installed":
+	case "installed", "ok":
 		return a.Out.Symbol("ok", status)
-	case "update":
+	case "update", "warn", "up-to-date":
 		return a.Out.Symbol("warn", status)
-	case "conflict", "failed", "missing", "modified":
+	case "conflict", "failed", "error", "missing", "modified", "fail":
 		return a.Out.Symbol("error", status)
 	default:
 		return a.Out.Symbol("dim", status)
@@ -104,6 +159,7 @@ func cmdInfo(ctx context.Context, a *app.App, args []string) error {
 	if len(args) != 1 {
 		return cerr.New(cerr.Usage, "info needs exactly one package")
 	}
+	autoRefresh(ctx, a)
 	info, err := a.Detail(ctx, args[0])
 	if err != nil {
 		return err
@@ -148,10 +204,10 @@ func cmdInfo(ctx context.Context, a *app.App, args []string) error {
 
 func cmdInstall(ctx context.Context, a *app.App, args []string) error {
 	fs := newFlagSet("install")
-	force := fs.Bool("force", false, "replace conflicting files")
+	force := fs.Bool("force", false, "replace conflicting files and reinstall")
 	forceSum := fs.Bool("force-checksum", false, "accept a checksum or TOFU hash mismatch")
 	dryRun := fs.Bool("dry-run", false, "resolve and show what would happen")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return cerr.New(cerr.Usage, "%v", err)
 	}
 	specs := fs.Args()
@@ -159,25 +215,18 @@ func cmdInstall(ctx context.Context, a *app.App, args []string) error {
 		return cerr.New(cerr.Usage, "install needs at least one package")
 	}
 	var results []app.Result
-	err := a.WithLock(func() error {
+	lockErr := a.WithLock(func() error {
 		a.MaybeRefresh(ctx, false)
 		var err error
-		results, err = a.Install(ctx, specs, app.InstallOptions{Force: *force, ForceChecksum: *forceSum, DryRun: *dryRun})
+		results, err = a.Install(ctx, specs, app.InstallOptions{
+			Force:         *force,
+			ForceChecksum: *forceSum,
+			DryRun:        *dryRun,
+			SkipCurrent:   !*force,
+		})
 		return err
 	})
-	printResults(a, results)
-	if err != nil {
-		if len(results) == 0 {
-			return err
-		}
-		return silent(err)
-	}
-	if a.Out.JSON {
-		if err := a.Out.JSONData(results); err != nil {
-			return err
-		}
-	}
-	return silent(app.ResultsError(results))
+	return finishResults(a, results, lockErr)
 }
 
 func cmdUpdate(ctx context.Context, a *app.App, args []string) error {
@@ -185,62 +234,73 @@ func cmdUpdate(ctx context.Context, a *app.App, args []string) error {
 	force := fs.Bool("force", false, "update even pinned packages")
 	dryRun := fs.Bool("dry-run", false, "show what would change")
 	fs.Bool("all", false, "update every package (default)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return cerr.New(cerr.Usage, "%v", err)
 	}
 	var results []app.Result
-	err := a.WithLock(func() error {
+	lockErr := a.WithLock(func() error {
 		a.MaybeRefresh(ctx, false)
 		var err error
 		results, err = a.Update(ctx, fs.Args(), *force, *dryRun)
 		return err
 	})
-	printResults(a, results)
-	if len(results) == 0 && !a.Out.JSON {
+	if !a.Out.JSON && len(results) == 0 && lockErr == nil {
 		a.Out.Infof("nothing to update")
 	}
-	if err != nil {
-		if len(results) == 0 {
-			return err
-		}
-		return silent(err)
-	}
-	if a.Out.JSON {
-		if err := a.Out.JSONData(results); err != nil {
-			return err
-		}
-	}
-	return silent(app.ResultsError(results))
+	return finishResults(a, results, lockErr)
 }
 
 func cmdRemove(ctx context.Context, a *app.App, args []string) error {
 	fs := newFlagSet("remove")
 	force := fs.Bool("force", false, "remove even if binaries were modified")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return cerr.New(cerr.Usage, "%v", err)
 	}
 	if len(fs.Args()) == 0 {
 		return cerr.New(cerr.Usage, "remove needs at least one package")
 	}
 	var results []app.Result
-	err := a.WithLock(func() error {
+	lockErr := a.WithLock(func() error {
 		var err error
 		results, err = a.Remove(ctx, fs.Args(), *force)
 		return err
 	})
-	printResults(a, results)
-	if err != nil {
-		if len(results) == 0 {
-			return err
-		}
-		return silent(err)
+	return finishResults(a, results, lockErr)
+}
+
+// finishResults renders results once, in either text or JSON form, and maps
+// failures onto the exit code.
+func finishResults(a *app.App, results []app.Result, lockErr error) error {
+	resultErr := app.ResultsError(results)
+	final := lockErr
+	if final == nil {
+		final = resultErr
 	}
 	if a.Out.JSON {
-		if err := a.Out.JSONData(results); err != nil {
+		code := 0
+		if final != nil {
+			code = int(cerr.KindOf(final))
+		}
+		if err := a.Out.JSONResult(results, final, code); err != nil {
 			return err
 		}
+		if final != nil {
+			return silent(final)
+		}
+		return nil
 	}
-	return silent(app.ResultsError(results))
+	printResults(a, results)
+	if lockErr != nil && !sameErr(lockErr, resultErr) {
+		return lockErr
+	}
+	return silent(resultErr)
+}
+
+func sameErr(a, b error) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Error() == b.Error()
 }
 
 func cmdPin(ctx context.Context, a *app.App, args []string) error {
@@ -276,51 +336,65 @@ func cmdUnpin(ctx context.Context, a *app.App, args []string) error {
 }
 
 func cmdVerify(ctx context.Context, a *app.App, args []string) error {
+	autoRefresh(ctx, a)
 	results, err := a.Verify(args)
 	if err != nil {
 		return err
 	}
-	if a.Out.JSON {
-		return a.Out.JSONData(results)
-	}
 	bad := 0
-	tw := tabwriter.NewWriter(a.Out.Out, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "PACKAGE\tBIN\tSTATUS\tDETAIL")
 	for _, r := range results {
 		if r.Status != "ok" {
 			bad++
 		}
+	}
+	var verifyErr error
+	if bad > 0 {
+		verifyErr = cerr.New(cerr.Integrity, "%d installed binaries failed verification", bad)
+	}
+	if a.Out.JSON {
+		if err := a.Out.JSONResult(results, verifyErr, int(cerr.KindOf(verifyErr))); err != nil {
+			return err
+		}
+		return silent(verifyErr)
+	}
+	tw := tabwriter.NewWriter(a.Out.Out, 2, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "PACKAGE\tBIN\tSTATUS\tDETAIL")
+	for _, r := range results {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", r.Package, r.Bin, colorStatus(a, r.Status), r.Detail)
 	}
 	_ = tw.Flush()
-	if bad > 0 {
-		return silent(cerr.New(cerr.Integrity, "%d installed binaries failed verification", bad))
-	}
-	return nil
+	return silent(verifyErr)
 }
 
 func cmdDoctor(ctx context.Context, a *app.App, args []string) error {
+	autoRefresh(ctx, a)
 	checks, err := a.Doctor()
 	if err != nil {
 		return err
 	}
-	if a.Out.JSON {
-		return a.Out.JSONData(checks)
-	}
 	fails := 0
-	tw := tabwriter.NewWriter(a.Out.Out, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "CHECK\tSTATUS\tDETAIL")
 	for _, c := range checks {
 		if c.Status == "fail" {
 			fails++
 		}
+	}
+	var doctorErr error
+	if fails > 0 {
+		doctorErr = cerr.New(cerr.Generic, "%d checks failed", fails)
+	}
+	if a.Out.JSON {
+		if err := a.Out.JSONResult(checks, doctorErr, int(cerr.KindOf(doctorErr))); err != nil {
+			return err
+		}
+		return silent(doctorErr)
+	}
+	tw := tabwriter.NewWriter(a.Out.Out, 2, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "CHECK\tSTATUS\tDETAIL")
+	for _, c := range checks {
 		fmt.Fprintf(tw, "%s\t%s\t%s\n", c.Name, colorStatus(a, c.Status), c.Detail)
 	}
 	_ = tw.Flush()
-	if fails > 0 {
-		return silent(cerr.New(cerr.Generic, "%d checks failed", fails))
-	}
-	return nil
+	return silent(doctorErr)
 }
 
 func printResults(a *app.App, results []app.Result) {
@@ -361,7 +435,7 @@ func sortedKeys(m map[string]string) []string {
 
 func cmdLists(ctx context.Context, a *app.App, args []string) error {
 	if len(args) == 0 {
-		return listsShow(a)
+		return listsShow(ctx, a)
 	}
 	switch args[0] {
 	case "add":
@@ -379,7 +453,8 @@ func cmdLists(ctx context.Context, a *app.App, args []string) error {
 	}
 }
 
-func listsShow(a *app.App) error {
+func listsShow(ctx context.Context, a *app.App) error {
+	autoRefresh(ctx, a)
 	infos := a.Lists()
 	if a.Out.JSON {
 		return a.Out.JSONData(infos)
@@ -409,7 +484,7 @@ func cmdListsAdd(ctx context.Context, a *app.App, args []string) error {
 	fs := newFlagSet("lists add")
 	name := fs.String("name", "", "override the list name")
 	replace := fs.Bool("replace", false, "replace an existing list")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return cerr.New(cerr.Usage, "%v", err)
 	}
 	if len(fs.Args()) != 1 {
@@ -458,7 +533,7 @@ func cmdListsRemove(ctx context.Context, a *app.App, args []string) error {
 func cmdListsRefresh(ctx context.Context, a *app.App, args []string) error {
 	fs := newFlagSet("lists refresh")
 	force := fs.Bool("force", false, "refresh even when not stale")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return cerr.New(cerr.Usage, "%v", err)
 	}
 	var results []app.RefreshResult
@@ -487,7 +562,10 @@ func cmdListsShow(a *app.App, args []string) error {
 	if len(args) != 1 {
 		return cerr.New(cerr.Usage, "usage: cpt lists show <name>")
 	}
-	data, err := os.ReadFile(filepath.Join(a.Paths.Lists, args[0]+".json"))
+	if !list.ValidName(args[0]) {
+		return cerr.New(cerr.Usage, "invalid list name %q", args[0])
+	}
+	data, err := os.ReadFile(filepath.Join(a.Paths.Lists, list.FileName(args[0])))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("unknown list %q", args[0])
@@ -495,7 +573,9 @@ func cmdListsShow(a *app.App, args []string) error {
 		return err
 	}
 	if !a.Out.JSON {
-		a.Out.Out.Write(data)
+		if _, err := a.Out.Out.Write(data); err != nil {
+			return err
+		}
 		if len(data) > 0 && data[len(data)-1] != '\n' {
 			a.Out.Line("")
 		}
@@ -511,17 +591,29 @@ func cmdListsShow(a *app.App, args []string) error {
 func cmdListsLint(ctx context.Context, a *app.App, args []string) error {
 	fs := newFlagSet("lists lint")
 	network := fs.Bool("network", false, "check asset URLs upstream")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return cerr.New(cerr.Usage, "%v", err)
 	}
 	results, err := a.Lint(ctx, *network)
 	if err != nil {
 		return err
 	}
-	if a.Out.JSON {
-		return a.Out.JSONData(results)
-	}
 	bad := 0
+	for _, r := range results {
+		if r.Error != "" {
+			bad++
+		}
+	}
+	var lintErr error
+	if bad > 0 {
+		lintErr = cerr.New(cerr.Generic, "%d lint checks failed", bad)
+	}
+	if a.Out.JSON {
+		if err := a.Out.JSONResult(results, lintErr, int(cerr.KindOf(lintErr))); err != nil {
+			return err
+		}
+		return silent(lintErr)
+	}
 	tw := tabwriter.NewWriter(a.Out.Out, 2, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "PACKAGE\tPLATFORM\tSTATUS\tDETAIL")
 	for _, r := range results {
@@ -530,17 +622,13 @@ func cmdListsLint(ctx context.Context, a *app.App, args []string) error {
 		if r.Error != "" {
 			status = "fail"
 			detail = r.Error
-			bad++
 		} else if r.Status != 0 {
 			detail = fmt.Sprintf("HTTP %d", r.Status)
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", r.Package, r.Platform, colorStatus(a, status), detail)
 	}
 	_ = tw.Flush()
-	if bad > 0 {
-		return silent(cerr.New(cerr.Generic, "%d lint checks failed", bad))
-	}
-	return nil
+	return silent(lintErr)
 }
 
 func humanAge(t time.Time) string {

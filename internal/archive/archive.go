@@ -296,16 +296,23 @@ type Bin struct {
 	Path string
 }
 
-// Select chooses the executables to install. When spec is non-empty only those
-// names are installed; otherwise every executable in the archive is considered,
-// preferring a file named after the package.
-func Select(files []File, dest string, spec []string, windows bool, pkgName string) ([]Bin, error) {
-	if len(spec) > 0 {
+// SelectOptions controls which files are installed as binaries.
+type SelectOptions struct {
+	Bins        []string
+	Windows     bool
+	StripPrefix bool
+}
+
+// Select chooses the executables to install. When Bins is non-empty only those
+// names are installed. Otherwise every executable within two path levels of
+// the archive root (after an optional single wrapper directory) is installed.
+func Select(files []File, dest string, opt SelectOptions) ([]Bin, error) {
+	if len(opt.Bins) > 0 {
 		var out []Bin
-		for _, want := range spec {
+		for _, want := range opt.Bins {
 			found := ""
 			for _, f := range files {
-				if binMatches(filepath.Base(f.Rel), want, windows) {
+				if binMatches(filepath.Base(f.Rel), want, opt.Windows) {
 					found = f.Rel
 					break
 				}
@@ -318,7 +325,7 @@ func Select(files []File, dest string, spec []string, windows bool, pkgName stri
 				for _, f := range files {
 					base := filepath.Base(f.Rel)
 					if strings.HasPrefix(base, want+"-") || strings.HasPrefix(base, want+"_") || strings.HasPrefix(base, want+".") {
-						if executable(f, windows) {
+						if executable(f, opt.Windows) {
 							prefixed = append(prefixed, f)
 						}
 					}
@@ -335,7 +342,7 @@ func Select(files []File, dest string, spec []string, windows bool, pkgName stri
 			} else {
 				name = filepath.Base(found)
 			}
-			if windows && !strings.EqualFold(filepath.Ext(name), ".exe") {
+			if opt.Windows && !strings.EqualFold(filepath.Ext(name), ".exe") {
 				name += ".exe"
 			}
 			out = append(out, Bin{Name: name, Path: filepath.Join(dest, found)})
@@ -343,12 +350,17 @@ func Select(files []File, dest string, spec []string, windows bool, pkgName stri
 		return dedupe(out)
 	}
 
+	prefix := ""
+	if opt.StripPrefix {
+		prefix = commonPrefix(files)
+	}
 	var candidates []File
 	for _, f := range files {
-		if depth(f.Rel) > 4 || excludedDoc(filepath.Base(f.Rel)) {
+		rel := strings.TrimPrefix(filepath.ToSlash(f.Rel), prefix)
+		if depth(rel) > 2 || excludedDoc(filepath.Base(rel)) {
 			continue
 		}
-		if !executable(f, windows) {
+		if !executable(f, opt.Windows) {
 			continue
 		}
 		candidates = append(candidates, f)
@@ -357,22 +369,32 @@ func Select(files []File, dest string, spec []string, windows bool, pkgName stri
 		return nil, fmt.Errorf("no executables found in archive")
 	}
 
-	// Prefer the file named after the package when one exists.
-	var preferred []File
-	for _, f := range candidates {
-		if binMatches(filepath.Base(f.Rel), pkgName, windows) {
-			preferred = append(preferred, f)
-		}
-	}
-	if len(preferred) > 0 {
-		candidates = preferred
-	}
-
 	out := make([]Bin, 0, len(candidates))
 	for _, f := range candidates {
 		out = append(out, Bin{Name: filepath.Base(f.Rel), Path: filepath.Join(dest, f.Rel)})
 	}
 	return dedupe(out)
+}
+
+// commonPrefix returns "dir/" when every file lives under the same top-level
+// directory, and "" otherwise.
+func commonPrefix(files []File) string {
+	if len(files) == 0 {
+		return ""
+	}
+	first := ""
+	for _, f := range files {
+		parts := strings.Split(filepath.ToSlash(f.Rel), "/")
+		if len(parts) < 2 {
+			return ""
+		}
+		if first == "" {
+			first = parts[0]
+		} else if parts[0] != first {
+			return ""
+		}
+	}
+	return first + "/"
 }
 
 func dedupe(bins []Bin) ([]Bin, error) {
@@ -440,8 +462,13 @@ func copyFile(src, dst string, mode os.FileMode) error {
 		return err
 	}
 	defer out.Close()
-	if _, err := io.Copy(out, io.LimitReader(in, MaxFileSize)); err != nil {
+	limit := int64(MaxFileSize)
+	written, err := io.Copy(out, io.LimitReader(in, limit+1))
+	if err != nil {
 		return err
+	}
+	if written > limit {
+		return fmt.Errorf("%s exceeds the %d byte extraction limit", filepath.Base(src), limit)
 	}
 	return nil
 }

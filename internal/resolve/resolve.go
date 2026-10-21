@@ -34,10 +34,13 @@ type Resolution struct {
 	Entry     *list.Package
 }
 
-// Options overrides the version chosen from the list or user pin.
+// Options overrides the version chosen from the list or user pin and can supply
+// a previously installed tag so a pinned reinstall needs no probe.
 type Options struct {
-	CLIVersion string
-	UserPin    string
+	CLIVersion   string
+	UserPin      string
+	InstalledTag string
+	InstalledVer string
 }
 
 const defaultStrip = `^v`
@@ -83,26 +86,40 @@ func Package(ctx context.Context, prober *source.Prober, entry list.Entry, plat 
 
 	switch pkg.Source.Type {
 	case "github":
-		probe, err := prober.Latest(ctx, pkg.Source.Repo)
-		if err != nil {
-			return nil, err
+		if prober == nil {
+			return nil, fmt.Errorf("%s: no version resolver available", pkg.Name)
 		}
-		version := versionOf(probe.Tag, pkg.Source.VersionStrip)
-		tag := probe.Tag
-		if requested != "" && requested != version {
-			tag, err = tagForVersion(probe.Tag, pkg.Source.VersionStrip, requested)
+		strip := pkg.Source.VersionStrip
+		tag := ""
+		canonical := pkg.Source.Repo
+		switch {
+		case requested != "" && isTagLike(requested, strip):
+			// The caller supplied a full release tag, so no probe is needed.
+			tag = requested
+		case requested != "" && requested == opt.InstalledVer && opt.InstalledTag != "":
+			// Reinstalling the version that is already recorded needs no probe.
+			tag = opt.InstalledTag
+		default:
+			probe, err := prober.Latest(ctx, pkg.Source.Repo)
 			if err != nil {
-				return nil, fmt.Errorf("%s: %w", pkg.Name, err)
+				return nil, err
 			}
-			version = requested
+			tag = probe.Tag
+			canonical = probe.Canonical
+			if requested != "" && requested != versionOf(probe.Tag, strip) {
+				tag, err = tagForVersion(probe.Tag, strip, requested)
+				if err != nil {
+					return nil, fmt.Errorf("%s: %w", pkg.Name, err)
+				}
+			}
 		}
 		res.Repo = pkg.Source.Repo
-		res.Canonical = probe.Canonical
+		res.Canonical = canonical
 		res.Tag = tag
-		res.Version = version
-		res.SourceID = "github:" + probe.Canonical
-		res.Asset = interpolate(template, tag, version)
-		res.URL = prober.ReleaseURL(probe.Canonical, tag, res.Asset)
+		res.Version = versionOf(tag, strip)
+		res.SourceID = "github:" + canonical
+		res.Asset = interpolate(template, tag, res.Version)
+		res.URL = prober.ReleaseURL(canonical, tag, res.Asset)
 	case "url":
 		if requested == "" {
 			return nil, fmt.Errorf("%s: url source needs a pinned version", pkg.Name)
@@ -202,6 +219,12 @@ func versionOf(tag, strip string) string {
 	return re.ReplaceAllString(tag, "")
 }
 
+// isTagLike reports whether s already looks like a release tag rather than a
+// bare version: stripping the configured prefix changes it.
+func isTagLike(s, strip string) bool {
+	return versionOf(s, strip) != s
+}
+
 func stripPattern(strip string) string {
 	if strings.TrimSpace(strip) == "" {
 		return defaultStrip
@@ -220,10 +243,6 @@ func tagForVersion(latestTag, strip, version string) (string, error) {
 		return "", fmt.Errorf("cannot derive tag for version %s from tag %s", version, latestTag)
 	}
 	prefix := strings.TrimSuffix(latestTag, latestVersion)
-	// A caller may pass a full tag; accept it when the prefix is already present.
-	if prefix != "" && strings.HasPrefix(version, prefix) && versionOf(version, strip) != version {
-		return version, nil
-	}
 	candidate := prefix + version
 	if versionOf(candidate, strip) != version {
 		return "", fmt.Errorf("cannot derive tag for version %s from tag %s", version, latestTag)

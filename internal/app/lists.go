@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SuSonicTH/cpt/internal/cerr"
@@ -77,15 +78,18 @@ func (a *App) refreshListChanged(ctx context.Context, name string, meta *state.L
 		return false, 0, fmt.Errorf("list %q has no origin", name)
 	}
 	header := http.Header{}
-	if meta.ETag != "" {
+	if meta.ETag != "" && !force {
 		header.Set("If-None-Match", meta.ETag)
 	}
-	data, hdr, err := httpc.Get(ctx, a.Client, origin, maxListSize, header)
+	data, hdr, err := httpc.Get(ctx, a.Client, origin, maxListSize, header, max(1, a.Cfg.HTTP.Retries))
 	if err != nil {
 		return false, 0, err
 	}
 	if data == nil {
-		// 304 Not Modified.
+		// 304 Not Modified. Repair a missing local file by refetching.
+		if _, statErr := os.Stat(filepath.Join(a.Paths.Lists, list.FileName(name))); statErr != nil {
+			return a.refreshListChanged(ctx, name, meta, true)
+		}
 		meta.FetchedAt = time.Now().UTC()
 		return false, meta.Packages, nil
 	}
@@ -120,13 +124,16 @@ type AddResult struct {
 
 // AddList installs a new list from an HTTP URL or a GitHub repository spec.
 func (a *App) AddList(ctx context.Context, spec string, opts AddListOptions) (AddResult, error) {
+	if a.Offline {
+		return AddResult{}, cerr.New(cerr.Usage, "cannot add a list in offline mode")
+	}
 	parsed, err := ParseListSpec(spec)
 	if err != nil {
 		return AddResult{}, err
 	}
-	data, hdr, err := httpc.Get(ctx, a.Client, parsed.Origin, maxListSize, nil)
+	data, hdr, err := httpc.Get(ctx, a.Client, parsed.Origin, maxListSize, nil, max(1, a.Cfg.HTTP.Retries))
 	if err != nil {
-		return AddResult{}, fmt.Errorf("fetch %s: %w", parsed.Origin, err)
+		return AddResult{}, err
 	}
 	l, err := list.Parse(data, parsed.Origin)
 	if err != nil {
@@ -290,6 +297,9 @@ type LintResult struct {
 // Lint validates every package. With network enabled it also checks that each
 // asset URL resolves upstream.
 func (a *App) Lint(ctx context.Context, network bool) ([]LintResult, error) {
+	if network && a.Offline {
+		return nil, cerr.New(cerr.Usage, "lists lint --network cannot run in offline mode")
+	}
 	cat, err := a.Catalog()
 	if err != nil {
 		return nil, err
@@ -303,6 +313,13 @@ func (a *App) Lint(ctx context.Context, network bool) ([]LintResult, error) {
 		sort.Strings(names)
 		return nil, cerr.New(cerr.Conflict, "packages defined by multiple lists: %s", strings.Join(names, ", "))
 	}
+
+	type job struct {
+		entry list.Entry
+		key   string
+		plat  platform.Platform
+	}
+	var jobs []job
 	var results []LintResult
 	for _, entry := range cat.Entries() {
 		if !network {
@@ -315,26 +332,60 @@ func (a *App) Lint(ctx context.Context, network bool) ([]LintResult, error) {
 				results = append(results, LintResult{Package: entry.Pkg.Name, Platform: key, Error: err.Error()})
 				continue
 			}
-			res, err := resolve.Package(ctx, a.Prober, entry, plat, resolve.Options{})
-			if err != nil {
-				results = append(results, LintResult{Package: entry.Pkg.Name, Platform: key, Error: err.Error()})
-				continue
-			}
-			resp, err := httpc.Head(ctx, a.Client, res.URL)
-			if err != nil {
-				results = append(results, LintResult{Package: res.Name, Platform: key, URL: res.URL, Error: err.Error()})
-				continue
-			}
-			resp.Body.Close()
-			status := resp.StatusCode
-			if status == http.StatusNotFound {
-				results = append(results, LintResult{Package: res.Name, Platform: key, URL: res.URL, Status: status, Error: "asset not found"})
-				continue
-			}
-			results = append(results, LintResult{Package: res.Name, Platform: key, URL: res.URL, Status: status})
+			jobs = append(jobs, job{entry: entry, key: key, plat: plat})
 		}
 	}
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, max(1, a.Cfg.Parallel))
+	for _, j := range jobs {
+		wg.Add(1)
+		go func(j job) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			r := a.lintOne(ctx, j.entry, j.key, j.plat)
+			mu.Lock()
+			results = append(results, r)
+			mu.Unlock()
+		}(j)
+	}
+	wg.Wait()
+
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Package != results[j].Package {
+			return results[i].Package < results[j].Package
+		}
+		return results[i].Platform < results[j].Platform
+	})
 	return results, nil
+}
+
+func (a *App) lintOne(ctx context.Context, entry list.Entry, key string, plat platform.Platform) LintResult {
+	res, err := resolve.Package(ctx, a.Prober, entry, plat, resolve.Options{})
+	if err != nil {
+		return LintResult{Package: entry.Pkg.Name, Platform: key, Error: err.Error()}
+	}
+	attempts := max(1, a.Cfg.HTTP.Retries)
+	resp, err := httpc.HeadRetry(ctx, a.Client, res.URL, attempts)
+	if err != nil {
+		return LintResult{Package: res.Name, Platform: key, URL: res.URL, Error: err.Error()}
+	}
+	status := resp.StatusCode
+	resp.Body.Close()
+
+	if status == http.StatusMethodNotAllowed {
+		// Some mirrors reject HEAD; a one-byte ranged GET proves the asset.
+		if _, _, getErr := httpc.Get(ctx, a.Client, res.URL, 1, http.Header{"Range": {"bytes=0-0"}}, attempts); getErr != nil {
+			return LintResult{Package: res.Name, Platform: key, URL: res.URL, Status: status, Error: getErr.Error()}
+		}
+		status = http.StatusOK
+	}
+	if status >= 400 {
+		return LintResult{Package: res.Name, Platform: key, URL: res.URL, Status: status, Error: fmt.Sprintf("HTTP %d", status)}
+	}
+	return LintResult{Package: res.Name, Platform: key, URL: res.URL, Status: status}
 }
 
 func firstNonEmpty(vals ...string) string {

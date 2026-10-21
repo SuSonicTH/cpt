@@ -35,9 +35,13 @@ See [PLAN.md](PLAN.md) for the full design and roadmap.
 
 ```sh
 go build -o cpt ./cmd/cpt
-install -m755 cpt ~/.cpt/bin/cpt   # ~/.cpt is created on first run
+mkdir -p ~/.cpt/bin
+install -m755 cpt ~/.cpt/bin/cpt
 export PATH="$HOME/.cpt/bin:$PATH"
 ```
+
+`~/.cpt` is created on first run; create `~/.cpt/bin` yourself before copying
+the binary there.
 
 Requires Go 1.24 or newer. The binary is pure Go (`CGO_ENABLED=0`) and builds
 for linux, darwin and windows on amd64 and arm64.
@@ -60,7 +64,12 @@ cpt remove micro
 
 `cpt pin jq@1.7.1` freezes an installed package; `cpt unpin jq` releases it.
 
-All commands accept `--json` and emit a stable envelope:
+`--offline` blocks all network access: list refreshes are skipped, adding lists
+fails, and installing anything not already present fails. Re-running `install`
+for a package that is already current is a no-op, so it works offline.
+
+List, search, info, install, update, remove, verify, doctor and the `lists`
+subcommands accept `--json` and emit a stable envelope (help stays plain text):
 
 ```json
 { "ok": true, "data": [ ... ] }
@@ -145,8 +154,8 @@ use a `url` source instead.
 
 When a checksum file is published, the download must match it. Otherwise cpt
 pins the SHA256 on first install (TOFU) and refuses to change it for that
-version unless you pass `--force-checksum`. A mismatch against a
-list-declared checksum is always a hard failure.
+version. A mismatch is fatal unless you explicitly pass `--force-checksum`,
+which records the install as `forced`.
 
 ## Layout
 

@@ -145,3 +145,24 @@ func TestVersionHelpers(t *testing.T) {
 		t.Fatalf("tagForVersion = %q, %v", tag, err)
 	}
 }
+
+func TestResolveReinstallUsesCachedTag(t *testing.T) {
+	// A server that always fails proves no probe is attempted.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	prober := &source.Prober{Client: srv.Client(), BaseURL: srv.URL, Attempts: 1}
+	entry := testEntry("tool", "acme/tool")
+	res, err := Package(context.Background(), prober, entry, platform.Platform{OS: "linux", Arch: "amd64"}, Options{
+		CLIVersion:   "1.2.3",
+		InstalledTag: "v1.2.3",
+		InstalledVer: "1.2.3",
+	})
+	if err != nil {
+		t.Fatalf("Package: %v", err)
+	}
+	if res.Tag != "v1.2.3" || res.Version != "1.2.3" {
+		t.Fatalf("unexpected resolution: %+v", res)
+	}
+}

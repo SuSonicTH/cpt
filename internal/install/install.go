@@ -25,44 +25,77 @@ type Manager struct {
 	Warnings []string
 }
 
-// Place copies bins into the bin directory and updates ownership in State.
-// It returns the installed binary names mapped to their content hashes.
+type target struct {
+	name string
+	dest string
+	src  string
+}
+
+// Place installs bins into the bin directory and updates ownership in State.
+// All conflicts are detected before any file is written. It returns the
+// installed binary names mapped to their content hashes.
 func (m *Manager) Place(name string, bins []archive.Bin) (map[string]string, error) {
 	if err := os.MkdirAll(m.BinDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create bin directory: %w", err)
 	}
-	installed := make(map[string]string, len(bins))
-	for _, b := range bins {
-		destName := b.Name
-		if runtime.GOOS == "windows" && filepath.Ext(destName) == "" {
-			destName += ".exe"
-		}
-		dest := filepath.Join(m.BinDir, destName)
 
-		if owner, ok := m.State.Owner(destName); ok && owner != name && !m.Force {
-			return nil, cerr.New(cerr.Conflict, "binary %q is already provided by %s (use --force to replace)", destName, owner)
-		}
-		if !fsutil.Exists(dest) {
-			delete(m.State.Provides, destName)
-		} else if _, owned := m.State.Owner(destName); !owned && !m.Force {
-			return nil, cerr.New(cerr.Conflict, "%s already exists and is not managed by cpt (use --force to replace)", dest)
-		}
+	targets, err := m.preflight(name, bins)
+	if err != nil {
+		return nil, err
+	}
 
-		fallback, err := copyAtomic(b.Path, dest)
+	// Stage every copy first so a failure cannot leave a half-installed package.
+	temps := make([]string, 0, len(targets))
+	cleanup := func() {
+		for _, tmp := range temps {
+			if tmp != "" {
+				_ = os.Remove(tmp)
+			}
+		}
+	}
+	for _, t := range targets {
+		tmp, err := stageCopy(t.src, m.BinDir)
 		if err != nil {
+			cleanup()
 			return nil, err
 		}
-		if fallback != "" {
-			m.Warnings = append(m.Warnings, fmt.Sprintf("%s is in use; new version written to %s", destName, fallback))
-			installed[destName] = ""
+		temps = append(temps, tmp)
+	}
+
+	installed := make(map[string]string, len(targets))
+	for i, t := range targets {
+		if err := os.Rename(temps[i], t.dest); err != nil {
+			if runtime.GOOS != "windows" {
+				cleanup()
+				return nil, fmt.Errorf("install %s: %w", t.name, err)
+			}
+			alt := t.dest + ".new"
+			if err2 := os.Rename(temps[i], alt); err2 != nil {
+				cleanup()
+				return nil, fmt.Errorf("install %s: %w", t.name, err)
+			}
+			m.Warnings = append(m.Warnings, fmt.Sprintf("%s is in use; new version written to %s", t.name, filepath.Base(alt)))
+			installed[t.name] = ""
+			temps[i] = ""
 			continue
 		}
-		hash, err := FileSHA256(dest)
+		temps[i] = ""
+
+		hash, err := FileSHA256(t.dest)
 		if err != nil {
+			cleanup()
 			return nil, err
 		}
-		installed[destName] = hash
-		m.State.Provides[destName] = name
+		installed[t.name] = hash
+	}
+
+	for bin := range installed {
+		if prev, ok := m.State.Owner(bin); ok && prev != name {
+			if p := m.State.Packages[prev]; p != nil {
+				delete(p.Bins, bin)
+			}
+		}
+		m.State.Provides[bin] = name
 	}
 
 	// Drop binaries this package used to provide but no longer does.
@@ -80,20 +113,68 @@ func (m *Manager) Place(name string, bins []archive.Bin) (map[string]string, err
 	return installed, nil
 }
 
-// copyAtomic copies src to dst, tolerating Windows sharing violations by
-// writing the new content to dst+".new" instead. It returns the fallback path
-// when that happened.
-func copyAtomic(src, dst string) (string, error) {
-	if err := fsutil.CopyFileAtomic(src, dst, 0o755); err == nil {
-		return "", nil
-	} else if runtime.GOOS != "windows" {
+// preflight validates every destination without touching the filesystem.
+func (m *Manager) preflight(name string, bins []archive.Bin) ([]target, error) {
+	targets := make([]target, 0, len(bins))
+	seen := make(map[string]bool, len(bins))
+	for _, b := range bins {
+		destName := b.Name
+		if runtime.GOOS == "windows" && filepath.Ext(destName) == "" {
+			destName += ".exe"
+		}
+		if seen[destName] {
+			return nil, fmt.Errorf("package %s provides %s twice", name, destName)
+		}
+		seen[destName] = true
+
+		dest := filepath.Join(m.BinDir, destName)
+		if owner, ok := m.State.Owner(destName); ok && owner != name && !m.Force {
+			return nil, cerr.New(cerr.Conflict,
+				"binary %q is already provided by %s (installing %s; use --force to replace)", destName, owner, name)
+		}
+		if fsutil.Exists(dest) {
+			if _, owned := m.State.Owner(destName); !owned && !m.Force {
+				return nil, cerr.New(cerr.Conflict,
+					"%s already exists and is not managed by cpt (use --force to replace)", dest)
+			}
+		}
+		targets = append(targets, target{name: destName, dest: dest, src: b.Path})
+	}
+	return targets, nil
+}
+
+// stageCopy copies src to a temporary file in dir, ready to be renamed.
+func stageCopy(src, dir string) (string, error) {
+	in, err := os.Open(src)
+	if err != nil {
 		return "", err
 	}
-	alt := dst + ".new"
-	if err := fsutil.CopyFileAtomic(src, alt, 0o755); err != nil {
+	defer in.Close()
+
+	f, err := os.CreateTemp(dir, ".cpt-stage-*")
+	if err != nil {
+		return "", fmt.Errorf("create staging file in %s: %w", dir, err)
+	}
+	tmp := f.Name()
+	if _, err := io.Copy(f, in); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("stage %s: %w", filepath.Base(src), err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
 		return "", err
 	}
-	return alt, nil
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return tmp, nil
 }
 
 // FileSHA256 returns the hex digest of a file.

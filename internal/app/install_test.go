@@ -67,7 +67,7 @@ func TestInstallURLSourceVerifiedAndTOFU(t *testing.T) {
 
 	root := t.TempDir()
 	var out, errb bytes.Buffer
-	a, err := Open(Options{Root: root, Offline: true, Quiet: true, Stdout: &out, Stderr: &errb})
+	a, err := Open(Options{Root: root, Quiet: true, Stdout: &out, Stderr: &errb})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestRemoveInstalledPackage(t *testing.T) {
 	defer srv.Close()
 
 	root := t.TempDir()
-	a, err := Open(Options{Root: root, Offline: true, Quiet: true, Stdout: io.Discard, Stderr: io.Discard})
+	a, err := Open(Options{Root: root, Quiet: true, Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func mustRead(t *testing.T, path string) []byte {
 
 func TestRowsConflictAndFilters(t *testing.T) {
 	root := t.TempDir()
-	a, err := Open(Options{Root: root, Offline: true, Quiet: true, Stdout: io.Discard, Stderr: io.Discard})
+	a, err := Open(Options{Root: root, Quiet: true, Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestRowsConflictAndFilters(t *testing.T) {
 
 func TestSaveStateIsAtomicJSON(t *testing.T) {
 	root := t.TempDir()
-	a, err := Open(Options{Root: root, Offline: true, Quiet: true, Stdout: io.Discard, Stderr: io.Discard})
+	a, err := Open(Options{Root: root, Quiet: true, Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatal(err)
 	}

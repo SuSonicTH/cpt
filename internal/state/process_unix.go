@@ -9,3 +9,6 @@ func processAlive(pid int) bool {
 	err := syscall.Kill(pid, 0)
 	return err == nil || err == syscall.EPERM
 }
+
+// livenessSupported reports whether processAlive is reliable.
+func livenessSupported() bool { return true }

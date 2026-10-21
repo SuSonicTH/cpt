@@ -40,6 +40,7 @@ type Prober struct {
 	BaseURL  string
 	CacheDir string
 	TTL      time.Duration
+	Attempts int
 	Offline  bool
 	NoCache  bool
 	Log      *slog.Logger
@@ -94,8 +95,8 @@ func (p *Prober) probe(ctx context.Context, repo string) (tag, canonical string,
 	}
 	client := p.noRedirectClient()
 	current := fmt.Sprintf("%s/%s/releases/latest", strings.TrimSuffix(base, "/"), repo)
-	for hop := 0; hop < 8; hop++ {
-		resp, reqErr := httpc.Head(ctx, client, current)
+	for hop := 0; hop < 5; hop++ {
+		resp, reqErr := httpc.HeadRetry(ctx, client, current, max(1, p.Attempts))
 		if reqErr != nil {
 			return "", "", fmt.Errorf("probe %s: %w", repo, reqErr)
 		}

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/SuSonicTH/cpt/internal/fsutil"
 )
 
 // CurrentSchema is the configuration schema version understood by this build.
@@ -184,7 +186,7 @@ func (c *Config) Save(path string) error {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(path, data, 0o644)
+	return fsutil.WriteFileAtomic(path, data, 0o644)
 }
 
 // BinDir returns the configured binary directory, falling back to paths.Bin.

@@ -68,7 +68,7 @@ func TestExtractAndSelectTarGz(t *testing.T) {
 	if len(files) != 3 {
 		t.Fatalf("expected 3 files, got %d", len(files))
 	}
-	bins, err := Select(files, dest, []string{"tool"}, false, "tool")
+	bins, err := Select(files, dest, SelectOptions{Bins: []string{"tool"}})
 	if err != nil {
 		t.Fatalf("Select: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestSelectFallsBackToPrefixedBinary(t *testing.T) {
 		{Rel: "yq_linux_amd64", Mode: 0o755},
 		{Rel: "yq.1", Mode: 0o644},
 	}
-	bins, err := Select(files, "/tmp", []string{"yq"}, false, "yq")
+	bins, err := Select(files, "/tmp", SelectOptions{Bins: []string{"yq"}})
 	if err != nil {
 		t.Fatalf("Select: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestSelectRawSingleFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
-	bins, err := Select(files, dest, []string{"jq"}, true, "jq")
+	bins, err := Select(files, dest, SelectOptions{Bins: []string{"jq"}, Windows: true})
 	if err != nil {
 		t.Fatalf("Select: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestExtractZip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
-	bins, err := Select(files, dest, []string{"tool"}, true, "tool")
+	bins, err := Select(files, dest, SelectOptions{Bins: []string{"tool"}, Windows: true})
 	if err != nil {
 		t.Fatalf("Select: %v", err)
 	}

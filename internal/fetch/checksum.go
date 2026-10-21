@@ -36,13 +36,13 @@ var (
 )
 
 // Discover fetches the first checksum file that contains a hash for asset.
-// A missing file (404) moves on to the next candidate. ErrNotFound is returned
+// A missing file (404) moves on to the next candidate. ErrNoChecksum is returned
 // when no candidate yields a match.
-func Discover(ctx context.Context, client *http.Client, candidates []Candidate, asset string) (Match, error) {
+func Discover(ctx context.Context, client *http.Client, candidates []Candidate, asset string, attempts int) (Match, error) {
 	var attempted []string
 	for _, cand := range candidates {
 		attempted = append(attempted, cand.Name)
-		data, _, err := httpc.Get(ctx, client, cand.URL, maxSums, nil)
+		data, _, err := httpc.Get(ctx, client, cand.URL, maxSums, nil, attempts)
 		if err != nil {
 			if errors.Is(err, httpc.ErrNotFound) {
 				continue

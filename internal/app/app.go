@@ -92,16 +92,36 @@ func Open(opts Options) (*App, error) {
 		Client:   httpc.NewNoRedirect(cfg.HTTP),
 		CacheDir: paths.ProbeCache,
 		TTL:      cfg.ProbeTTL(),
+		Attempts: cfg.HTTP.Retries,
 		Offline:  opts.Offline,
 		Log:      logger,
 	}
 	if err := list.EnsureBuiltin(paths.Lists, cpt.BuiltinList()); err != nil {
 		return nil, err
 	}
+	cleanStaleTmp(paths.Tmp)
 	if err := a.loadState(); err != nil {
 		return nil, err
 	}
 	return a, nil
+}
+
+// cleanStaleTmp removes staging leftovers from crashed runs. Recent entries are
+// kept because another cpt process may still be using them.
+func cleanStaleTmp(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if time.Since(info.ModTime()) > time.Hour {
+			_ = os.RemoveAll(filepath.Join(dir, e.Name()))
+		}
+	}
 }
 
 // Close releases resources held by the app.
@@ -120,10 +140,15 @@ func (a *App) loadState() error {
 		return err
 	}
 	if _, ok := st.Lists["core"]; !ok {
+		packages := 0
+		if l, err := list.Parse(cpt.BuiltinList(), "builtin"); err == nil {
+			packages = len(l.Packages)
+		}
 		st.Lists["core"] = &state.List{
 			Origin:    cpt.BuiltinListOrigin,
 			Builtin:   true,
 			FetchedAt: time.Now().UTC(),
+			Packages:  packages,
 		}
 	}
 	a.State = st

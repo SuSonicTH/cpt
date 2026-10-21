@@ -11,6 +11,7 @@ import (
 
 	"github.com/SuSonicTH/cpt/internal/app"
 	"github.com/SuSonicTH/cpt/internal/cerr"
+	"github.com/SuSonicTH/cpt/internal/out"
 	"github.com/SuSonicTH/cpt/internal/version"
 )
 
@@ -51,6 +52,14 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	if g.Version || rest[0] == "version" {
+		if g.JSON {
+			p := out.New(stdout, stderr, true, false, true)
+			return exitOn(p.JSONData(map[string]string{
+				"version": version.Version,
+				"commit":  version.Commit,
+				"date":    version.Date,
+			}))
+		}
 		fmt.Fprintln(stdout, version.Full())
 		return 0
 	}
@@ -91,10 +100,18 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 func printError(jsonMode bool, stdout, stderr io.Writer, err error) {
 	if jsonMode {
-		fmt.Fprintf(stdout, "{\n  \"ok\": false,\n  \"error\": {\n    \"code\": %d,\n    \"message\": %q\n  }\n}\n", int(cerr.KindOf(err)), err.Error())
+		p := out.New(stdout, stderr, true, false, true)
+		_ = p.JSONError(int(cerr.KindOf(err)), err)
 		return
 	}
 	fmt.Fprintf(stderr, "cpt: %v\n", err)
+}
+
+func exitOn(err error) int {
+	if err != nil {
+		return int(cerr.Generic)
+	}
+	return 0
 }
 
 func dispatch(ctx context.Context, a *app.App, cmd string, args []string) error {

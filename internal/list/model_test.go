@@ -112,6 +112,13 @@ func TestCatalogLookup(t *testing.T) {
 	}
 }
 
+func TestParseRejectsTrailingData(t *testing.T) {
+	doc := validDoc() + " trailing"
+	if _, err := Parse([]byte(doc), "test"); err == nil || !strings.Contains(err.Error(), "trailing data") {
+		t.Fatalf("expected trailing data error, got %v", err)
+	}
+}
+
 func TestSlug(t *testing.T) {
 	cases := map[string]string{
 		"Core Tools": "core-tools",

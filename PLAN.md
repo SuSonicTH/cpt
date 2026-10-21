@@ -228,9 +228,9 @@ In order:
    rather than misparsed.
 
 Not found means TOFU: the hash is pinned in state. A later mismatch is a hard failure
-with expected/actual values and a `cpt trust pkg@version` escape hatch. A mismatch
-against a **list-declared** checksum is never overridable except with the explicit
-`--force-checksum` flag.
+with expected/actual values; `--force-checksum` is the explicit escape hatch. A
+mismatch against any published checksum is equally fatal unless `--force-checksum`
+is passed.
 
 ### Safety
 
@@ -437,6 +437,7 @@ The linux/amd64 asset below is what GitHub actually serves today.
 | fd | sharkdp/fd | `fd-v{version}-x86_64-unknown-linux-gnu.tar.gz` | TOFU |
 | yq | mikefarah/yq | `yq_linux_amd64.tar.gz` | non-standard `checksums` -> TOFU |
 | gh | cli/cli | `gh_{version}_linux_amd64.tar.gz` | `gh_{version}_checksums.txt` |
+| k9s | derailed/k9s | `k9s_Linux_amd64.tar.gz` (no version) | `checksums.sha256` |
 | lazygit | jesseduffield/lazygit | `lazygit_{version}_linux_x86_64.tar.gz` | `checksums.txt` |
 | delta | dandavison/delta | `delta-{version}-x86_64-unknown-linux-gnu.tar.gz` | TOFU |
 | zoxide | ajeetdsouza/zoxide | `zoxide-{version}-x86_64-unknown-linux-musl.tar.gz` | TOFU |
@@ -453,7 +454,6 @@ The linux/amd64 asset below is what GitHub actually serves today.
 | direnv | direnv/direnv | `direnv.linux-amd64` (raw) | TOFU |
 | yt-dlp | yt-dlp/yt-dlp | `yt-dlp_linux` (raw) | `SHA2-256SUMS` |
 | jj | jj-vcs/jj | `jj-v{version}-x86_64-unknown-linux-musl.tar.gz` | TOFU |
-| terraform | hashicorp/terraform | `terraform_{version}_linux_amd64.zip` | `SHA256SUMS` |
 
 Watch the `{tag}` vs `{version}` split per row: Rust tools often keep the `v`, others
 do not, jq uses `jq-1.8.2`, just uses `1.59.0`.

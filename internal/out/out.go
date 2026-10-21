@@ -84,6 +84,16 @@ func (p *Printer) JSONError(code int, err error) error {
 	return p.jsonEnvelope(Envelope{OK: false, Error: &Payload{Code: code, Message: err.Error()}})
 }
 
+// JSONResult emits an envelope carrying data and, when err is non-nil, a
+// failure payload with the given exit code.
+func (p *Printer) JSONResult(data any, err error, code int) error {
+	env := Envelope{OK: err == nil, Data: data}
+	if err != nil {
+		env.Error = &Payload{Code: code, Message: err.Error()}
+	}
+	return p.jsonEnvelope(env)
+}
+
 func (p *Printer) jsonEnvelope(env Envelope) error {
 	enc := json.NewEncoder(p.Out)
 	enc.SetIndent("", "  ")

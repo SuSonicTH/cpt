@@ -2,9 +2,12 @@
 package list
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/SuSonicTH/cpt/internal/platform"
@@ -86,9 +89,12 @@ type ShellFlavor struct {
 // error messages.
 func Parse(data []byte, source string) (*List, error) {
 	var l List
-	dec := json.NewDecoder(strings.NewReader(string(data)))
+	dec := json.NewDecoder(bytes.NewReader(data))
 	if err := dec.Decode(&l); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", source, err)
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("parse %s: trailing data after the list document", source)
 	}
 	if err := l.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid %s: %w", source, err)
@@ -200,7 +206,7 @@ func (p *Package) Platforms() []string {
 	for key := range p.Source.Asset {
 		out = append(out, key)
 	}
-	sortStrings(out)
+	sort.Strings(out)
 	return out
 }
 
@@ -221,12 +227,4 @@ func Slug(s string) string {
 		return "list"
 	}
 	return out
-}
-
-func sortStrings(s []string) {
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j] < s[j-1]; j-- {
-			s[j], s[j-1] = s[j-1], s[j]
-		}
-	}
 }
