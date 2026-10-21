@@ -217,3 +217,14 @@ func TestVersionJSON(t *testing.T) {
 		t.Fatalf("unexpected envelope: %+v", env)
 	}
 }
+
+func TestDashDashStopsFlagParsing(t *testing.T) {
+	root, _ := urlFixture(t)
+	code, _, errb := runCLI(t, "--root", root, "install", "--", "--force")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(errb, `unknown package "--force"`) {
+		t.Fatalf("-- did not stop flag parsing: %s", errb)
+	}
+}

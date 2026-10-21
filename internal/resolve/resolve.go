@@ -158,6 +158,14 @@ func Package(ctx context.Context, prober *source.Prober, entry list.Entry, plat 
 	return res, nil
 }
 
+// VersionOf strips the configured prefix from a tag.
+func VersionOf(tag, strip string) string { return versionOf(tag, strip) }
+
+// ChecksumCandidates returns the checksum files to try for res.
+func ChecksumCandidates(pkg *list.Package, prober *source.Prober, res *Resolution) []fetch.Candidate {
+	return checksumCandidates(pkg, prober, res)
+}
+
 func checksumCandidates(pkg *list.Package, prober *source.Prober, res *Resolution) []fetch.Candidate {
 	names := make([]string, 0, len(pkg.Source.Checksums)+len(defaultChecksums))
 	names = append(names, pkg.Source.Checksums...)

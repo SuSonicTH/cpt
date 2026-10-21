@@ -171,9 +171,13 @@ func (a *App) Remove(ctx context.Context, names []string, force bool) ([]Result,
 		for _, d := range plans[i] {
 			if d.exists {
 				if err := os.Remove(d.path); err != nil && !os.IsNotExist(err) {
+					// Record the progress made so state matches the disk.
+					delete(p.Bins, d.bin)
+					delete(a.State.Provides, d.bin)
 					return results, fmt.Errorf("remove %s: %w", d.path, err)
 				}
 			}
+			delete(p.Bins, d.bin)
 			delete(a.State.Provides, d.bin)
 		}
 		a.State.Remove(name)
@@ -333,6 +337,22 @@ func (a *App) installRequests(ctx context.Context, reqs []request, opt InstallOp
 	return results, firstResultError(results)
 }
 
+// adoptLatestTag refreshes the resolved tag after a latest/download fallback,
+// so state and checksum candidates refer to the bytes actually downloaded.
+func (a *App) adoptLatestTag(ctx context.Context, res *resolve.Resolution) {
+	probe := *a.Prober
+	probe.NoCache = true
+	latest, err := probe.Latest(ctx, res.Repo)
+	if err != nil || latest.Tag == "" || latest.Tag == res.Tag {
+		return
+	}
+	res.Tag = latest.Tag
+	res.Version = resolve.VersionOf(latest.Tag, res.Entry.Source.VersionStrip)
+	res.Canonical = latest.Canonical
+	res.URL = a.Prober.ReleaseURL(latest.Canonical, latest.Tag, res.Asset)
+	res.Checksums = resolve.ChecksumCandidates(res.Entry, &probe, res)
+}
+
 func (a *App) stage(ctx context.Context, req request, plat platform.Platform, previous map[string]*state.Package, opt InstallOptions) *staged {
 	name := req.entry.Pkg.Name
 	prev := previous[name]
@@ -345,16 +365,25 @@ func (a *App) stage(ctx context.Context, req request, plat platform.Platform, pr
 	}
 
 	// Declaring a current, intact install up-to-date must not require the
-	// network, so do it before resolving a version.
+	// network, but only an explicit version (or offline mode) may skip the
+	// probe. Without a requested version cpt must still look for updates.
 	if prev != nil && opt.SkipCurrent && !opt.Force {
-		sameVersion := requested == "" || requested == prev.Version || requested == prev.Tag
-		if sameVersion && a.installedCurrent(prev) {
+		exact := requested != "" && (requested == prev.Version || requested == prev.Tag)
+		switch {
+		case exact && a.installedCurrent(prev):
 			return &staged{
 				res:    &resolve.Resolution{Name: name, List: req.entry.List, Version: prev.Version, Tag: prev.Tag},
 				action: "up-to-date",
 			}
-		}
-		if sameVersion && a.Offline {
+		case exact && a.Offline:
+			return &staged{err: fmt.Errorf("%s: offline and the installed copy is damaged; reconnect to repair it", name)}
+		case requested == "" && a.Offline:
+			if a.installedCurrent(prev) {
+				return &staged{
+					res:    &resolve.Resolution{Name: name, List: req.entry.List, Version: prev.Version, Tag: prev.Tag},
+					action: "up-to-date",
+				}
+			}
 			return &staged{err: fmt.Errorf("%s: offline and the installed copy is damaged; reconnect to repair it", name)}
 		}
 	}
@@ -400,6 +429,7 @@ func (a *App) stage(ctx context.Context, req request, plat platform.Platform, pr
 			if altSHA, _, altErr := down.To(ctx, alt, assetPath, res.Name); altErr == nil {
 				sha, err = altSHA, nil
 				res.URL = alt
+				a.adoptLatestTag(ctx, res)
 			}
 		}
 	}
@@ -438,6 +468,9 @@ func (a *App) stage(ctx context.Context, req request, plat platform.Platform, pr
 // installedCurrent reports whether every binary recorded for p still exists
 // with the recorded hash.
 func (a *App) installedCurrent(p *state.Package) bool {
+	if len(p.Bins) == 0 {
+		return false
+	}
 	for bin, want := range p.Bins {
 		path := filepath.Join(a.BinDir(), bin)
 		got, err := install.FileSHA256(path)

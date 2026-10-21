@@ -28,9 +28,11 @@ func newFlagSet(name string) *flag.FlagSet {
 // "install fzf --force" behaves like "install --force fzf".
 func parseFlags(fs *flag.FlagSet, args []string) error {
 	var flags, positional []string
+	sawDash := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
+			sawDash = true
 			positional = append(positional, args[i+1:]...)
 			break
 		}
@@ -51,7 +53,12 @@ func parseFlags(fs *flag.FlagSet, args []string) error {
 		}
 		positional = append(positional, arg)
 	}
-	return fs.Parse(append(flags, positional...))
+	combined := append([]string{}, flags...)
+	if sawDash {
+		combined = append(combined, "--")
+	}
+	combined = append(combined, positional...)
+	return fs.Parse(combined)
 }
 
 // autoRefresh refreshes stale lists for read-only commands. Failures are not

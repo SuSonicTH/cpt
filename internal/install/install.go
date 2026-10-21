@@ -62,11 +62,41 @@ func (m *Manager) Place(name string, bins []archive.Bin) (map[string]string, err
 	}
 
 	installed := make(map[string]string, len(targets))
+
+	// Preserve existing binaries so a late failure can restore them.
+	backups := make([]string, len(targets))
+	for i, t := range targets {
+		if info, err := os.Lstat(t.dest); err == nil && info.Mode().IsRegular() {
+			b, err := stageCopy(t.dest, m.BinDir)
+			if err != nil {
+				cleanup()
+				for _, prev := range backups {
+					if prev != "" {
+						_ = os.Remove(prev)
+					}
+				}
+				return nil, err
+			}
+			backups[i] = b
+		}
+	}
+	removeBackups := func() {
+		for _, b := range backups {
+			if b != "" {
+				_ = os.Remove(b)
+			}
+		}
+	}
 	var committed []string
 	rollback := func() {
 		cleanup()
 		for _, path := range committed {
 			_ = os.Remove(path)
+		}
+		for i, b := range backups {
+			if b != "" {
+				_ = os.Rename(b, targets[i].dest)
+			}
 		}
 	}
 	for i, t := range targets {
@@ -96,6 +126,7 @@ func (m *Manager) Place(name string, bins []archive.Bin) (map[string]string, err
 		}
 		installed[t.name] = hash
 	}
+	removeBackups()
 
 	for bin := range installed {
 		if prev, ok := m.State.Owner(bin); ok && prev != name {

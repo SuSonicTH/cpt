@@ -465,3 +465,55 @@ func TestVersionlessFallbackNeverOverridesAPin(t *testing.T) {
 		t.Fatalf("latest bytes were installed for a pinned version: %v", statErr)
 	}
 }
+
+func TestUpdateActuallyUpdatesUnpinnedPackage(t *testing.T) {
+	v1 := tarGz(t, map[string]string{"tool": "v1"})
+	v2 := tarGz(t, map[string]string{"tool": "v2"})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/acme/tool/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/acme/tool/releases/tag/v2.0.0", http.StatusFound)
+	})
+	mux.HandleFunc("/acme/tool/releases/download/v1.0.0/tool-v1.0.0.tar.gz", func(w http.ResponseWriter, r *http.Request) { w.Write(v1) })
+	mux.HandleFunc("/acme/tool/releases/download/v2.0.0/tool-v2.0.0.tar.gz", func(w http.ResponseWriter, r *http.Request) { w.Write(v2) })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	doc := fmt.Sprintf(`{"schema":1,"name":"test","packages":[{"name":"tool","source":{"type":"github","repo":"acme/tool","bins":["tool"],"asset":{%q:"tool-{tag}.tar.gz"}}}]}`, platform.Current().String())
+	root := t.TempDir()
+	a, err := Open(Options{Root: root, Quiet: true, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	a.Prober.BaseURL = srv.URL
+	a.Prober.Client = srv.Client()
+	a.Client = srv.Client()
+	if err := os.WriteFile(filepath.Join(root, "lists", "test.json"), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := installOne(t, a, "tool@v1.0.0", InstallOptions{}); err != nil {
+		t.Fatalf("install v1: %v", err)
+	}
+	if got := mustRead(t, filepath.Join(root, "bin", "tool")); string(got) != "v1" {
+		t.Fatalf("unexpected v1 content %q", got)
+	}
+
+	var results []Result
+	if err := a.WithLock(func() error {
+		var err error
+		results, err = a.Update(context.Background(), []string{"tool"}, false, false)
+		return err
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if len(results) != 1 || results[0].Action != "updated" || results[0].Version != "2.0.0" {
+		t.Fatalf("unexpected update results: %+v", results)
+	}
+	if got := mustRead(t, filepath.Join(root, "bin", "tool")); string(got) != "v2" {
+		t.Fatalf("binary was not updated: %q", got)
+	}
+	if a.State.Packages["tool"].Version != "2.0.0" {
+		t.Fatalf("state version = %q", a.State.Packages["tool"].Version)
+	}
+}
