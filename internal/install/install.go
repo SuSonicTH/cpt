@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/SuSonicTH/cpt/internal/archive"
 	"github.com/SuSonicTH/cpt/internal/cerr"
@@ -18,7 +19,11 @@ import (
 // tmpDirName holds staging and backup files inside the bin directory. It is
 // cleaned at the start of every install and is on the same filesystem as the
 // destinations, so renames stay atomic.
-const tmpDirName = ".cpt-tmp"
+const TmpDirName = ".cpt-tmp"
+
+// backupPrefix marks copies of replaced binaries kept for recovery. Unlike
+// staging files, they survive the next install.
+const backupPrefix = "bk-"
 
 // Manager installs binaries and maintains ownership records.
 type Manager struct {
@@ -42,12 +47,15 @@ func (m *Manager) Place(name string, bins []archive.Bin) (map[string]string, err
 	if err := os.MkdirAll(m.BinDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create bin directory: %w", err)
 	}
-	tmpDir := filepath.Join(m.BinDir, tmpDirName)
+	tmpDir := filepath.Join(m.BinDir, TmpDirName)
 	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create staging directory: %w", err)
 	}
 	if entries, err := os.ReadDir(tmpDir); err == nil {
 		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), backupPrefix) {
+				continue // recovery copy from a failed restore
+			}
 			_ = os.RemoveAll(filepath.Join(tmpDir, e.Name()))
 		}
 	}
@@ -66,7 +74,7 @@ func (m *Manager) Place(name string, bins []archive.Bin) (map[string]string, err
 		}
 	}
 	for _, t := range targets {
-		tmp, err := stageCopy(t.src, tmpDir)
+		tmp, err := stageCopy(t.src, tmpDir, "stage-")
 		if err != nil {
 			cleanup()
 			return nil, err
@@ -77,7 +85,7 @@ func (m *Manager) Place(name string, bins []archive.Bin) (map[string]string, err
 	backups := make([]string, len(targets))
 	for i, t := range targets {
 		if info, err := os.Lstat(t.dest); err == nil && info.Mode().IsRegular() {
-			b, err := stageCopy(t.dest, tmpDir)
+			b, err := stageCopy(t.dest, tmpDir, backupPrefix)
 			if err != nil {
 				cleanup()
 				for _, prev := range backups {
@@ -218,14 +226,14 @@ func (m *Manager) preflight(name string, bins []archive.Bin) ([]target, error) {
 }
 
 // stageCopy copies src to a temporary file in dir, ready to be renamed.
-func stageCopy(src, dir string) (string, error) {
+func stageCopy(src, dir, prefix string) (string, error) {
 	in, err := os.Open(src)
 	if err != nil {
 		return "", err
 	}
 	defer in.Close()
 
-	f, err := os.CreateTemp(dir, "stage-*")
+	f, err := os.CreateTemp(dir, prefix+"*")
 	if err != nil {
 		return "", fmt.Errorf("create staging file in %s: %w", dir, err)
 	}
@@ -274,4 +282,19 @@ func FileSHA256(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// RecoveryBackups lists retained backups from failed rollbacks.
+func RecoveryBackups(binDir string) []string {
+	entries, err := os.ReadDir(filepath.Join(binDir, TmpDirName))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), backupPrefix) {
+			out = append(out, filepath.Join(binDir, TmpDirName, e.Name()))
+		}
+	}
+	return out
 }

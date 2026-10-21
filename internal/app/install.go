@@ -626,6 +626,10 @@ func (a *App) Doctor() ([]Check, error) {
 		}
 	}
 
+	for _, backup := range install.RecoveryBackups(a.BinDir()) {
+		add("recovery-backup", "warn", backup)
+	}
+
 	if cat, err := a.Catalog(); err != nil {
 		add("lists", "fail", err.Error())
 	} else if conflicts := cat.Conflicts(); len(conflicts) > 0 {
