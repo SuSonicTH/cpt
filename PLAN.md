@@ -162,7 +162,7 @@ Rules:
   "provides": { "fzf": "fzf", "rg": "ripgrep" },
   "lists": {
     "core": {
-      "origin": "https://raw.githubusercontent.com/SuSonicTH/cpt/main/cpt.json",
+      "origin": "https://raw.githubusercontent.com/SuSonicTH/cpt/master/cpt.json",
       "etag": "W/...",
       "sha256": "...",
       "fetched_at": "2026-10-21T09:00:00Z",
@@ -526,9 +526,10 @@ other.
 
 ## 14. Risks, ranked
 
-1. **The repository is private today** (verified: unauthenticated 404). It must be made
-   public before M1 or the master list cannot be fetched anonymously. Nothing else
-   blocks.
+1. **Repository visibility — resolved.** The repo is public and returns 200
+   unauthenticated. Its default branch is `master`, so the master list is fetched from
+   `https://raw.githubusercontent.com/SuSonicTH/cpt/master/cpt.json`. That file does
+   not exist yet; it ships in M1.
 2. **No API means hand-maintained asset names.** Upstreams rename constantly
    (`lazygit_..._Linux_...` -> `..._linux_...`, micro changed orgs, yq checksums are
    non-standard). Mitigations: nightly lint, resolve errors that print the exact 404
