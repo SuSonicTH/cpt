@@ -147,9 +147,13 @@ func dispatch(ctx context.Context, a *app.App, cmd string, args []string) error 
 func parseGlobals(args []string) (globals, []string, error) {
 	var g globals
 	var rest []string
+	seenCommand := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
+			if seenCommand {
+				rest = append(rest, "--")
+			}
 			rest = append(rest, args[i+1:]...)
 			break
 		}
@@ -180,6 +184,9 @@ func parseGlobals(args []string) (globals, []string, error) {
 			g.Version = true
 		default:
 			rest = append(rest, arg)
+			if !strings.HasPrefix(arg, "-") {
+				seenCommand = true
+			}
 		}
 	}
 	return g, rest, nil

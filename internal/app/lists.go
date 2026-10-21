@@ -86,8 +86,11 @@ func (a *App) refreshListChanged(ctx context.Context, name string, meta *state.L
 		return false, 0, err
 	}
 	if data == nil {
-		// 304 Not Modified. Repair a missing local file by refetching.
+		// 304 Not Modified. Repair a missing local file by refetching once.
 		if _, statErr := os.Stat(filepath.Join(a.Paths.Lists, list.FileName(name))); statErr != nil {
+			if force {
+				return false, 0, fmt.Errorf("%s returned 304 without a conditional request", origin)
+			}
 			return a.refreshListChanged(ctx, name, meta, true)
 		}
 		meta.FetchedAt = time.Now().UTC()
@@ -326,7 +329,11 @@ func (a *App) Lint(ctx context.Context, network bool) ([]LintResult, error) {
 			results = append(results, LintResult{Package: entry.Pkg.Name, Platform: "*"})
 			continue
 		}
-		for _, key := range entry.Pkg.Platforms() {
+		keys := entry.Pkg.Platforms()
+		if entry.Pkg.Source.Type == "url" {
+			keys = []string{platform.Current().String()}
+		}
+		for _, key := range keys {
 			plat, err := platform.Parse(key)
 			if err != nil {
 				results = append(results, LintResult{Package: entry.Pkg.Name, Platform: key, Error: err.Error()})
@@ -376,11 +383,15 @@ func (a *App) lintOne(ctx context.Context, entry list.Entry, key string, plat pl
 	resp.Body.Close()
 
 	if status == http.StatusMethodNotAllowed {
-		// Some mirrors reject HEAD; a one-byte ranged GET proves the asset.
-		if _, _, getErr := httpc.Get(ctx, a.Client, res.URL, 1, http.Header{"Range": {"bytes=0-0"}}, attempts); getErr != nil {
+		// Some mirrors reject HEAD; a ranged GET proves the asset exists.
+		code, getErr := httpc.ProbeAsset(ctx, a.Client, res.URL, attempts)
+		if getErr != nil {
 			return LintResult{Package: res.Name, Platform: key, URL: res.URL, Status: status, Error: getErr.Error()}
 		}
-		status = http.StatusOK
+		if code >= 400 {
+			return LintResult{Package: res.Name, Platform: key, URL: res.URL, Status: code, Error: fmt.Sprintf("HTTP %d", code)}
+		}
+		status = code
 	}
 	if status >= 400 {
 		return LintResult{Package: res.Name, Platform: key, URL: res.URL, Status: status, Error: fmt.Sprintf("HTTP %d", status)}

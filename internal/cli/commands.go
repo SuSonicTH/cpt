@@ -57,7 +57,7 @@ func parseFlags(fs *flag.FlagSet, args []string) error {
 // autoRefresh refreshes stale lists for read-only commands. Failures are not
 // fatal; the cached lists are still usable.
 func autoRefresh(ctx context.Context, a *app.App) {
-	if a.Offline {
+	if a.Offline || !a.ListsStale() {
 		return
 	}
 	if err := a.WithLock(func() error {

@@ -12,7 +12,6 @@ import (
 
 	"github.com/SuSonicTH/cpt/internal/archive"
 	"github.com/SuSonicTH/cpt/internal/cerr"
-	"github.com/SuSonicTH/cpt/internal/fsutil"
 	"github.com/SuSonicTH/cpt/internal/state"
 )
 
@@ -63,27 +62,36 @@ func (m *Manager) Place(name string, bins []archive.Bin) (map[string]string, err
 	}
 
 	installed := make(map[string]string, len(targets))
+	var committed []string
+	rollback := func() {
+		cleanup()
+		for _, path := range committed {
+			_ = os.Remove(path)
+		}
+	}
 	for i, t := range targets {
 		if err := os.Rename(temps[i], t.dest); err != nil {
 			if runtime.GOOS != "windows" {
-				cleanup()
+				rollback()
 				return nil, fmt.Errorf("install %s: %w", t.name, err)
 			}
 			alt := t.dest + ".new"
 			if err2 := os.Rename(temps[i], alt); err2 != nil {
-				cleanup()
+				rollback()
 				return nil, fmt.Errorf("install %s: %w", t.name, err)
 			}
 			m.Warnings = append(m.Warnings, fmt.Sprintf("%s is in use; new version written to %s", t.name, filepath.Base(alt)))
 			installed[t.name] = ""
 			temps[i] = ""
+			committed = append(committed, alt)
 			continue
 		}
 		temps[i] = ""
+		committed = append(committed, t.dest)
 
 		hash, err := FileSHA256(t.dest)
 		if err != nil {
-			cleanup()
+			rollback()
 			return nil, err
 		}
 		installed[t.name] = hash
@@ -132,7 +140,10 @@ func (m *Manager) preflight(name string, bins []archive.Bin) ([]target, error) {
 			return nil, cerr.New(cerr.Conflict,
 				"binary %q is already provided by %s (installing %s; use --force to replace)", destName, owner, name)
 		}
-		if fsutil.Exists(dest) {
+		if info, err := os.Lstat(dest); err == nil {
+			if !info.Mode().IsRegular() {
+				return nil, fmt.Errorf("%s exists and is not a regular file", dest)
+			}
 			if _, owned := m.State.Owner(destName); !owned && !m.Force {
 				return nil, cerr.New(cerr.Conflict,
 					"%s already exists and is not managed by cpt (use --force to replace)", dest)

@@ -13,8 +13,10 @@ import (
 
 	"github.com/SuSonicTH/cpt/internal/cerr"
 	"github.com/SuSonicTH/cpt/internal/config"
+	"github.com/SuSonicTH/cpt/internal/install"
 	"github.com/SuSonicTH/cpt/internal/list"
 	"github.com/SuSonicTH/cpt/internal/platform"
+	"github.com/SuSonicTH/cpt/internal/state"
 )
 
 // fixture builds an App over a temp root with one URL-based package per entry.
@@ -305,5 +307,161 @@ func TestLintTreatsHTTPErrorsAsFailures(t *testing.T) {
 	}
 	if res.Status != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", res.Status)
+	}
+}
+
+func TestRemovePreflightsAllBinaries(t *testing.T) {
+	content := tarGz(t, map[string]string{"aaa": "a", "zzz": "z"})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(content) }))
+	defer srv.Close()
+
+	a, root := fixture(t, urlPackage("mytool", srv.URL+"/t.tar.gz", "aaa", "zzz"))
+	if _, err := installOne(t, a, "mytool", InstallOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "bin", "zzz"), []byte("tampered"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.WithLock(func() error {
+		_, err := a.Remove(context.Background(), []string{"mytool"}, false)
+		return err
+	}); err == nil {
+		t.Fatal("expected removal to fail")
+	}
+	if _, err := os.Stat(filepath.Join(root, "bin", "aaa")); err != nil {
+		t.Fatalf("aaa was deleted before preflight finished: %v", err)
+	}
+	if a.State.Packages["mytool"] == nil {
+		t.Fatal("state was partially updated")
+	}
+}
+
+func TestInstallRollsBackOnLateFailure(t *testing.T) {
+	content := tarGz(t, map[string]string{"aaa": "a", "zzz": "z"})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(content) }))
+	defer srv.Close()
+
+	a, root := fixture(t, urlPackage("mytool", srv.URL+"/t.tar.gz", "aaa", "zzz"))
+	// A directory at a destination cannot be replaced even with --force.
+	if err := os.Mkdir(filepath.Join(root, "bin", "zzz"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := installOne(t, a, "mytool", InstallOptions{Force: true})
+	if err == nil {
+		t.Fatal("expected install to fail")
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "bin", "aaa")); !os.IsNotExist(statErr) {
+		t.Fatalf("aaa was left behind after rollback: %v", statErr)
+	}
+	if a.State.Packages["mytool"] != nil {
+		t.Fatal("failed install was recorded")
+	}
+}
+
+func TestLintFallsBackFrom405(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Write([]byte("a large enough body"))
+	}))
+	defer srv.Close()
+
+	a := &App{Cfg: &config.Config{Parallel: 1, HTTP: config.HTTP{Retries: 1, TimeoutSeconds: 5}}, Client: srv.Client()}
+	entry := list.Entry{Pkg: &list.Package{
+		Name:    "mytool",
+		Version: "1.0.0",
+		Source:  list.Source{Type: "url", URL: srv.URL + "/asset", Bins: []string{"mytool"}},
+	}}
+	res := a.lintOne(context.Background(), entry, "linux/amd64", platform.Platform{OS: "linux", Arch: "amd64"})
+	if res.Error != "" {
+		t.Fatalf("405 fallback failed: %+v", res)
+	}
+	if res.Status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.Status)
+	}
+}
+
+func TestOfflineReinstallWorksWithoutProbeCache(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"bin", "lists", "cache/probe", "logs", "tmp"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	binPath := filepath.Join(root, "bin", "mytool")
+	if err := os.WriteFile(binPath, []byte("binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := install.FileSHA256(binPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := state.New()
+	st.Packages["mytool"] = &state.Package{
+		Version: "1.0.0",
+		Tag:     "v1.0.0",
+		Bins:    map[string]string{"mytool": hash},
+	}
+	st.Provides["mytool"] = "mytool"
+	if err := st.Save(filepath.Join(root, "state.json")); err != nil {
+		t.Fatal(err)
+	}
+	plat := platform.Current()
+	doc := fmt.Sprintf(`{"schema":1,"name":"test","packages":[{"name":"mytool","source":{"type":"github","repo":"acme/tool","bins":["mytool"],"asset":{%q:"tool-{tag}"}}}]}`, plat.String())
+	if err := os.WriteFile(filepath.Join(root, "lists", "test.json"), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := Open(Options{Root: root, Offline: true, Quiet: true, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	results, err := installOne(t, a, "mytool", InstallOptions{SkipCurrent: true})
+	if err != nil {
+		t.Fatalf("offline reinstall should be a no-op: %v", err)
+	}
+	if len(results) != 1 || results[0].Action != "up-to-date" {
+		t.Fatalf("unexpected results: %+v", results)
+	}
+}
+
+func TestVersionlessFallbackNeverOverridesAPin(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/acme/tool/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/acme/tool/releases/tag/v2.0.0", http.StatusFound)
+	})
+	mux.HandleFunc("/acme/tool/releases/download/v2.0.0/tool", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("latest-bytes"))
+	})
+	mux.HandleFunc("GET /acme/tool/releases/latest/download/tool", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("latest-bytes"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	doc := fmt.Sprintf(`{"schema":1,"name":"test","packages":[{"name":"tool","source":{"type":"github","repo":"acme/tool","bins":["tool"],"asset":{%q:"tool"}}}]}`, platform.Current().String())
+
+	root := t.TempDir()
+	a, err := Open(Options{Root: root, Quiet: true, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	a.Prober.BaseURL = srv.URL
+	a.Prober.Client = srv.Client()
+	a.Client = srv.Client()
+	if err := os.WriteFile(filepath.Join(root, "lists", "test.json"), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = installOne(t, a, "tool@v1.0.0", InstallOptions{})
+	if err == nil {
+		t.Fatal("a pinned version-less install must not fall back to latest")
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "bin", "tool")); !os.IsNotExist(statErr) {
+		t.Fatalf("latest bytes were installed for a pinned version: %v", statErr)
 	}
 }

@@ -30,8 +30,10 @@ type Resolution struct {
 	URL       string
 	Format    string
 	Pinned    bool
-	Checksums []fetch.Candidate
-	Entry     *list.Package
+	// AssetVersioned is true when the asset template embeds {tag} or {version}.
+	AssetVersioned bool
+	Checksums      []fetch.Candidate
+	Entry          *list.Package
 }
 
 // Options overrides the version chosen from the list or user pin and can supply
@@ -96,9 +98,15 @@ func Package(ctx context.Context, prober *source.Prober, entry list.Entry, plat 
 		case requested != "" && isTagLike(requested, strip):
 			// The caller supplied a full release tag, so no probe is needed.
 			tag = requested
+			if cached, ok := prober.Cached(pkg.Source.Repo); ok {
+				canonical = cached.Canonical
+			}
 		case requested != "" && requested == opt.InstalledVer && opt.InstalledTag != "":
 			// Reinstalling the version that is already recorded needs no probe.
 			tag = opt.InstalledTag
+			if cached, ok := prober.Cached(pkg.Source.Repo); ok {
+				canonical = cached.Canonical
+			}
 		default:
 			probe, err := prober.Latest(ctx, pkg.Source.Repo)
 			if err != nil {
@@ -119,6 +127,7 @@ func Package(ctx context.Context, prober *source.Prober, entry list.Entry, plat 
 		res.Version = versionOf(tag, strip)
 		res.SourceID = "github:" + canonical
 		res.Asset = interpolate(template, tag, res.Version)
+		res.AssetVersioned = strings.Contains(template, "{tag}") || strings.Contains(template, "{version}")
 		res.URL = prober.ReleaseURL(canonical, tag, res.Asset)
 	case "url":
 		if requested == "" {

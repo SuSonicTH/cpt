@@ -84,7 +84,7 @@ func Get(ctx context.Context, client *http.Client, url string, limit int64, head
 			if attempt == attempts || ctx.Err() != nil {
 				return nil, nil, lastErr
 			}
-			if err := sleepCtx(ctx, backoff(nil, attempt)); err != nil {
+			if err := sleepCtx(ctx, Backoff(nil, attempt)); err != nil {
 				return nil, nil, lastErr
 			}
 			continue
@@ -103,11 +103,13 @@ func Get(ctx context.Context, client *http.Client, url string, limit int64, head
 			return nil, resp.Header, nil
 		case resp.StatusCode == http.StatusNotFound:
 			drain(resp.Body)
+			resp.Body.Close()
 			return nil, resp.Header, fmt.Errorf("%s: %w", url, ErrNotFound)
 		case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
-			delay := backoff(resp, attempt)
+			delay := Backoff(resp, attempt)
 			code := resp.StatusCode
 			drain(resp.Body)
+			resp.Body.Close()
 			if attempt == attempts {
 				return nil, nil, cerr.New(cerr.Network, "%s: HTTP %d after %d attempts", url, code, attempts)
 			}
@@ -117,6 +119,7 @@ func Get(ctx context.Context, client *http.Client, url string, limit int64, head
 			continue
 		default:
 			body := readSmall(resp.Body)
+			resp.Body.Close()
 			return nil, nil, cerr.New(cerr.Network, "%s: HTTP %d: %s", url, resp.StatusCode, body)
 		}
 	}
@@ -143,13 +146,13 @@ func HeadRetry(ctx context.Context, client *http.Client, url string, attempts in
 			if attempt == attempts || ctx.Err() != nil {
 				return nil, lastErr
 			}
-			if err := sleepCtx(ctx, backoff(nil, attempt)); err != nil {
+			if err := sleepCtx(ctx, Backoff(nil, attempt)); err != nil {
 				return nil, lastErr
 			}
 			continue
 		}
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-			delay := backoff(resp, attempt)
+			delay := Backoff(resp, attempt)
 			code := resp.StatusCode
 			resp.Body.Close()
 			lastErr = cerr.New(cerr.Network, "%s: HTTP %d", url, code)
@@ -164,6 +167,45 @@ func HeadRetry(ctx context.Context, client *http.Client, url string, attempts in
 		return resp, nil
 	}
 	return nil, lastErr
+}
+
+// ProbeAsset checks that url exists without downloading it. It accepts any 2xx
+// response, including a ranged 206, and closes the body immediately.
+func ProbeAsset(ctx context.Context, client *http.Client, url string, attempts int) (int, error) {
+	attempts = max(1, attempts)
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return 0, err
+		}
+		req.Header.Set("Range", "bytes=0-0")
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = cerr.Wrap(cerr.Network, fmt.Errorf("%s: %w", url, err))
+			if attempt == attempts || ctx.Err() != nil {
+				return 0, lastErr
+			}
+			if err := sleepCtx(ctx, Backoff(nil, attempt)); err != nil {
+				return 0, lastErr
+			}
+			continue
+		}
+		code := resp.StatusCode
+		resp.Body.Close()
+		if code == http.StatusTooManyRequests || code >= 500 {
+			lastErr = cerr.New(cerr.Network, "%s: HTTP %d", url, code)
+			if attempt == attempts {
+				return code, lastErr
+			}
+			if err := sleepCtx(ctx, Backoff(resp, attempt)); err != nil {
+				return code, lastErr
+			}
+			continue
+		}
+		return code, nil
+	}
+	return 0, lastErr
 }
 
 func readLimited(r io.Reader, limit int64) ([]byte, error) {
@@ -195,7 +237,7 @@ func drain(r io.Reader) {
 
 // backoff returns how long to wait before the next attempt. A Retry-After
 // header (seconds or HTTP date) wins over exponential-ish backoff.
-func backoff(resp *http.Response, attempt int) time.Duration {
+func Backoff(resp *http.Response, attempt int) time.Duration {
 	if resp != nil {
 		if v := strings.TrimSpace(resp.Header.Get("Retry-After")); v != "" {
 			if secs, err := strconv.Atoi(v); err == nil && secs >= 0 {

@@ -134,8 +134,13 @@ func (a *App) Remove(ctx context.Context, names []string, force bool) ([]Result,
 			return nil, fmt.Errorf("%s is not installed", name)
 		}
 	}
-	var results []Result
-	for _, name := range names {
+	type planned struct {
+		path   string
+		bin    string
+		exists bool
+	}
+	plans := make([][]planned, len(names))
+	for i, name := range names {
 		p := a.State.Packages[name]
 		if p == nil {
 			continue
@@ -147,16 +152,29 @@ func (a *App) Remove(ctx context.Context, names []string, force bool) ([]Result,
 			}
 			path := filepath.Join(a.BinDir(), bin)
 			got, err := install.FileSHA256(path)
-			if err == nil && want != "" && got != want && !force {
-				return results, fmt.Errorf("%s was modified since installation; use --force to remove it", path)
-			}
 			if err != nil && !os.IsNotExist(err) {
-				return results, fmt.Errorf("hash %s: %w", path, err)
+				return nil, fmt.Errorf("hash %s: %w", path, err)
 			}
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				return results, fmt.Errorf("remove %s: %w", path, err)
+			if err == nil && want != "" && got != want && !force {
+				return nil, fmt.Errorf("%s was modified since installation; use --force to remove it", path)
 			}
-			delete(a.State.Provides, bin)
+			plans[i] = append(plans[i], planned{path: path, bin: bin, exists: err == nil})
+		}
+	}
+
+	var results []Result
+	for i, name := range names {
+		p := a.State.Packages[name]
+		if p == nil {
+			continue
+		}
+		for _, d := range plans[i] {
+			if d.exists {
+				if err := os.Remove(d.path); err != nil && !os.IsNotExist(err) {
+					return results, fmt.Errorf("remove %s: %w", d.path, err)
+				}
+			}
+			delete(a.State.Provides, d.bin)
 		}
 		a.State.Remove(name)
 		results = append(results, Result{Name: name, Version: p.Version, Action: "removed"})
@@ -316,18 +334,43 @@ func (a *App) installRequests(ctx context.Context, reqs []request, opt InstallOp
 }
 
 func (a *App) stage(ctx context.Context, req request, plat platform.Platform, previous map[string]*state.Package, opt InstallOptions) *staged {
+	name := req.entry.Pkg.Name
+	prev := previous[name]
+	requested := req.version
+	if requested == "" {
+		requested = req.pin
+	}
+	if requested == "" {
+		requested = strings.TrimSpace(req.entry.Pkg.Version)
+	}
+
+	// Declaring a current, intact install up-to-date must not require the
+	// network, so do it before resolving a version.
+	if prev != nil && opt.SkipCurrent && !opt.Force {
+		sameVersion := requested == "" || requested == prev.Version || requested == prev.Tag
+		if sameVersion && a.installedCurrent(prev) {
+			return &staged{
+				res:    &resolve.Resolution{Name: name, List: req.entry.List, Version: prev.Version, Tag: prev.Tag},
+				action: "up-to-date",
+			}
+		}
+		if sameVersion && a.Offline {
+			return &staged{err: fmt.Errorf("%s: offline and the installed copy is damaged; reconnect to repair it", name)}
+		}
+	}
+
 	resolveOpt := resolve.Options{CLIVersion: req.version, UserPin: req.pin}
-	if prev := previous[req.entry.Pkg.Name]; prev != nil {
+	if prev != nil {
 		resolveOpt.InstalledTag = prev.Tag
 		resolveOpt.InstalledVer = prev.Version
 	}
 	res, err := resolve.Package(ctx, a.Prober, req.entry, plat, resolveOpt)
 	if err != nil {
-		return &staged{err: fmt.Errorf("%s: %w", req.entry.Pkg.Name, err)}
+		return &staged{err: fmt.Errorf("%s: %w", name, err)}
 	}
 	st := &staged{res: res}
-	if prev := previous[res.Name]; prev != nil && opt.SkipCurrent && prev.Version == res.Version && !opt.Force {
-		if a.installedIntact(prev) {
+	if prev != nil && opt.SkipCurrent && prev.Version == res.Version && !opt.Force {
+		if a.installedCurrent(prev) {
 			st.action = "up-to-date"
 			return st
 		}
@@ -349,8 +392,10 @@ func (a *App) stage(ctx context.Context, req request, plat platform.Platform, pr
 	assetPath := filepath.Join(dir, safeAssetName(res.Asset))
 	down := &fetch.Downloader{Client: a.Client, Attempts: max(1, a.Cfg.HTTP.Retries)}
 	sha, _, err := down.To(ctx, res.URL, assetPath, res.Name)
-	if err != nil && errors.Is(err, httpc.ErrNotFound) && res.Repo != "" {
-		alt := a.Prober.LatestAssetURL(res.Repo, res.Asset)
+	if err != nil && errors.Is(err, httpc.ErrNotFound) && !res.AssetVersioned && !res.Pinned && res.Canonical != "" {
+		// Version-less assets are only reachable through the latest path, and
+		// only when the caller did not pin a specific release.
+		alt := a.Prober.LatestAssetURL(res.Canonical, res.Asset)
 		if alt != res.URL {
 			if altSHA, _, altErr := down.To(ctx, alt, assetPath, res.Name); altErr == nil {
 				sha, err = altSHA, nil
@@ -390,10 +435,16 @@ func (a *App) stage(ctx context.Context, req request, plat platform.Platform, pr
 	return st
 }
 
-// installedIntact reports whether every binary recorded for p still exists.
-func (a *App) installedIntact(p *state.Package) bool {
-	for bin := range p.Bins {
-		if _, err := os.Stat(filepath.Join(a.BinDir(), bin)); err != nil {
+// installedCurrent reports whether every binary recorded for p still exists
+// with the recorded hash.
+func (a *App) installedCurrent(p *state.Package) bool {
+	for bin, want := range p.Bins {
+		path := filepath.Join(a.BinDir(), bin)
+		got, err := install.FileSHA256(path)
+		if err != nil {
+			return false
+		}
+		if want != "" && got != want {
 			return false
 		}
 	}

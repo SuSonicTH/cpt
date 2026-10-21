@@ -193,9 +193,9 @@ For `type: github`:
 5. Asset URL is
    `https://github.com/{canonical_repo}/releases/download/{tag}/{interpolated asset}`.
 6. If that 404s, fall back to
-   `https://github.com/{repo}/releases/latest/download/{interpolated asset}`. This
-   handles version-less asset names and reveals the tag in its redirect (verified:
-   `starship-x86_64-unknown-linux-musl.tar.gz` -> `/download/v1.27.0/...`).
+   `https://github.com/{repo}/releases/latest/download/{interpolated asset}`, but
+   only for unpinned, version-less asset names. Pinned installs never fall back, so
+   a pin can never silently install a newer release.
 
 Cost per package is one HEAD per TTL, so the anonymous API quota is irrelevant. GitHub
 HTML can still throttle: use `parallel=4`, honour `Retry-After`, back off on 429.

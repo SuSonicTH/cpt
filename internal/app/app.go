@@ -99,29 +99,10 @@ func Open(opts Options) (*App, error) {
 	if err := list.EnsureBuiltin(paths.Lists, cpt.BuiltinList()); err != nil {
 		return nil, err
 	}
-	cleanStaleTmp(paths.Tmp)
 	if err := a.loadState(); err != nil {
 		return nil, err
 	}
 	return a, nil
-}
-
-// cleanStaleTmp removes staging leftovers from crashed runs. Recent entries are
-// kept because another cpt process may still be using them.
-func cleanStaleTmp(dir string) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		if time.Since(info.ModTime()) > time.Hour {
-			_ = os.RemoveAll(filepath.Join(dir, e.Name()))
-		}
-	}
 }
 
 // Close releases resources held by the app.
@@ -166,6 +147,10 @@ func (a *App) WithLock(fn func() error) error {
 	defer lock.Release()
 	if err := a.loadState(); err != nil {
 		return err
+	}
+	// No other cpt process can be staging files while we hold the lock.
+	if err := os.RemoveAll(a.Paths.Tmp); err == nil {
+		_ = os.MkdirAll(a.Paths.Tmp, 0o755)
 	}
 	fnErr := fn()
 	saveErr := a.State.Save(a.Paths.StateFile)
@@ -226,6 +211,22 @@ func (a *App) LoadedLists() ([]string, error) {
 	}
 	sort.Strings(names)
 	return names, nil
+}
+
+// ListsStale reports whether any writable list needs a refresh.
+func (a *App) ListsStale() bool {
+	for name, meta := range a.State.Lists {
+		if meta == nil || meta.Readonly {
+			continue
+		}
+		if meta.FetchedAt.IsZero() || time.Since(meta.FetchedAt) >= a.Cfg.ListTTL() {
+			return true
+		}
+		if _, err := os.Stat(filepath.Join(a.Paths.Lists, list.FileName(name))); err != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // MaybeRefresh refreshes stale lists, logging rather than failing.

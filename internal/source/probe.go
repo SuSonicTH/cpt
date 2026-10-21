@@ -144,6 +144,14 @@ func (p *Prober) noRedirectClient() *http.Client {
 	return &c
 }
 
+// Cached returns a previously probed result without touching the network.
+func (p *Prober) Cached(repo string) (Probe, bool) {
+	if p == nil || p.CacheDir == "" {
+		return Probe{}, false
+	}
+	return readCache(p.cachePath(strings.TrimPrefix(strings.TrimSuffix(repo, "/"), "/")))
+}
+
 // ReleaseURL returns the download URL for an asset of a specific tag.
 func (p *Prober) ReleaseURL(repo, tag, asset string) string {
 	base := p.BaseURL
