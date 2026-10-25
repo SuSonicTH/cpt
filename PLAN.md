@@ -6,8 +6,9 @@ GitHub releases) using declarative JSON package lists, installs them into a flat
 `~/.cpt/bin`, and can freeze a chosen set of tools into a single native binary that sets
 up a working `cpt` environment on another machine.
 
-Status: design accepted; M0–M5 implemented (core, CLI, shell integration, TUI, bundles,
-Windows/macOS platform support), plus the completed M5.1 bundle/UI polish milestone.
+Status: design accepted; M0–M6 implemented (core, CLI, shell integration, TUI,
+bundles, Windows/macOS platform support and saved SSH targets), plus the completed
+M5.1 bundle/UI polish milestone. Release engineering moved from M6 to M7.
 
 ---
 
@@ -27,6 +28,7 @@ Windows/macOS platform support), plus the completed M5.1 bundle/UI polish milest
 | Conflicts | Duplicate package names are a hard error |
 | Shell | Generated `cptinit.sh` / `cptinit.ps1`, opt-in rc edit; Windows shell packages deferred |
 | Target state | Live environment by default, `--frozen` for air-gapped targets |
+| SSH targets | System `ssh`/`scp`; saved destination + bundle; session-scoped init; never edits remote rc |
 | Repo | Public, `github.com/SuSonicTH/cpt` |
 | CI | Full build matrix, goreleaser, nightly list lint |
 
@@ -38,7 +40,9 @@ Windows/macOS platform support), plus the completed M5.1 bundle/UI polish milest
 ~/.cpt/
 ├── config.json                # user preferences
 ├── state.json                 # installed packages, hashes, list metadata, bin ownership
+├── ssh.json                   # saved SSH targets (bundle + ssh destination)
 ├── .lock                      # flock/LockFileEx: one mutating cpt at a time
+├── .ssh.lock                  # serializes ssh.json updates
 ├── bin/                       # flat, on PATH; cpt itself lives here
 ├── lists/
 │   ├── core.json              # master list (builtin, refreshable)
@@ -288,6 +292,12 @@ cpt shell approve fzf                 # promote a pending snippet
 cpt shell reject --all                # discard every pending change
 cpt bundle create devbox --packages fzf,jq,rg --target linux/arm64 --frozen
 cpt bundle rebuild devbox
+cpt ssh                        # list saved SSH targets
+cpt ssh staging                # copy the target's bundle and open an interactive session
+cpt ssh add staging --bundle devbox --config-host staging-box --cleanup
+cpt ssh add lab --bundle devbox --host 10.0.0.7 --user mike --port 2222
+cpt ssh edit staging --shell zsh
+cpt ssh remove staging
 cpt self-update
 cpt version
 ```
@@ -416,7 +426,7 @@ Re-running is idempotent. Live bundles leave lists writable so `cpt update` work
 
 ## 9. TUI
 
-Bubble Tea + Lip Gloss + Bubbles. Tabs: **Packages · Lists · Bundles · Log**.
+Bubble Tea + Lip Gloss + Bubbles. Tabs: **Packages · Lists · Bundles · SSH · Log**.
 
 ```
 ┌ cpt ──────────────────────────────────────────────────────────────┐
@@ -443,6 +453,12 @@ Bubble Tea + Lip Gloss + Bubbles. Tabs: **Packages · Lists · Bundles · Log**.
   `x` remove. Changed shell snippets surface here for approval with a diff.
 - Bundles tab: two columns like Packages. The left table lists saved bundles; the
   selected bundle's details and full included-package list appear on the right.
+- SSH tab: the same two-column layout. The left table lists saved targets;
+  the right side shows the referenced bundle, effective SSH destination, shell,
+  remote root and cleanup policy. `n`/`e` open the target wizard, `enter` or `c`
+  connects, and `d` deletes the local target. Connecting hands the terminal to
+  `cpt --root <root> ssh <target>` through `tea.ExecProcess`, so SSH password and
+  key-passphrase prompts work normally; the TUI resumes when the session ends.
 - `n` and `e` open the same four-step wizard (name → target platform → packages →
   live/frozen + build). Editing pre-fills the name, target, package selection and
   mode. Targets are chosen from a selectable platform list and packages from a
@@ -452,6 +468,188 @@ Bubble Tea + Lip Gloss + Bubbles. Tabs: **Packages · Lists · Bundles · Log**.
   yellow (`[space] select`, `[e] edit`, …), the tab strip carries a
   `[tab] switch tabs` hint, and prompt labels are never ellipsised.
 - Non-TTY or `--no-tui` prints a clear message and routes to the CLI.
+
+---
+
+## 9.1 SSH targets (M6)
+
+An SSH target is a saved local recipe that pairs one already-built bundle with an
+SSH destination. `cpt ssh <name>` copies the bundle to the remote host, runs it
+there to install or refresh `~/.cpt`, then opens an interactive SSH session whose
+shell has the generated `cptinit` loaded. It **never** edits `.bashrc`, `.zshrc`,
+`.profile` or any other remote startup file, and it never passes `--install-init`.
+When the session ends, the remote cpt root is removed only when the target opts
+in to cleanup.
+
+### Storage
+
+`~/.cpt/ssh.json`, schema 1, written atomically under a dedicated `.ssh.lock`:
+
+```json
+{
+  "schema": 1,
+  "targets": {
+    "staging": {
+      "name": "staging",
+      "bundle": "devbox",
+      "ssh": {
+        "source": "config",
+        "host": "staging-box",
+        "user": "",
+        "port": 0,
+        "identity_file": "",
+        "proxy_jump": ""
+      },
+      "remote_root": "",
+      "shell": "auto",
+      "cleanup_on_exit": false,
+      "force": false,
+      "created": "2026-10-25T10:00:00Z",
+      "updated": "2026-10-25T10:00:00Z",
+      "last_connected": "2026-10-25T10:05:00Z",
+      "last_copied": "2026-10-25T10:05:00Z",
+      "copied_sha256": "abcdef...",
+      "copied_key": "abcdef..."
+    }
+  }
+}
+```
+
+- Target and bundle names use the bundle-name rules. `bundle` must name an
+  existing manifest with a valid executable under `bundles/`; a missing or
+  corrupt bundle is an error and the target wizard never builds one implicitly.
+- `ssh.source = "config"`: `host` is an alias from `~/.ssh/config`. `ssh` and
+  `scp` receive the alias, so `HostName`, `User`, `Port`, `IdentityFile`,
+  `ProxyJump`, `Match` and `Include` keep their normal OpenSSH semantics. The
+  non-empty `user`, `port`, `identity_file` and `proxy_jump` fields are explicit
+  overrides passed as flags. `ssh -G <alias>` is used only to display the
+  effective destination.
+- `ssh.source = "custom"`: `host` is a hostname or IP and `user`, `port`,
+  `identity_file`, `proxy_jump` are passed explicitly. This is the "new server
+  / user combo" path; it does not write `~/.ssh/config`.
+- `remote_root` empty means the remote `~/.cpt`. A non-empty value is an absolute
+  POSIX path. Cleanup refuses `/`, top-level directories, `$HOME` and paths that
+  contain `$HOME`. The remote bundle is installed with `--dest <remote_root>`
+  when a custom root is configured.
+- `shell`: `auto`, `bash`, `zsh` or `sh`. `auto` uses the remote `$SHELL`.
+- `cleanup_on_exit` defaults false. `force` is passed to the bundle only when
+  explicitly enabled to replace unmanaged remote files.
+- No passwords or passphrases are stored. Authentication is whatever the system
+  `ssh`/`scp` does (agent, key file, keyboard-interactive).
+- M6 targets POSIX remotes (Linux/macOS) with `bash`, `zsh` or `sh`. Windows
+  OpenSSH/PowerShell remotes are deferred.
+
+`~/.ssh/config` discovery for the wizard parses `Host` and `Include` entries,
+skips wildcard and negated patterns, and deduplicates aliases. M6 reads the
+default path only; there is no `$CPT_SSH_CONFIG`/`--ssh-config` override. Ports,
+users and keys shown in the detail pane come from `ssh -G`, not from a second
+config parser, so display matches what OpenSSH will actually use.
+
+### Connect flow
+
+1. Load and validate the target, resolve the referenced bundle manifest and
+   executable, and reject offline mode. The bundle's target platform remains the
+   authority; the remote bootstrap checks `uname -s`/`uname -m` when possible and
+   aborts with a clear mismatch message before running the bundle.
+2. Copy the bundle with `scp` to a shell-safe upload path in the remote home.
+   The destination root is not touched before the bundle runs, so a first install
+   still passes `bundle.validateDest` with a clean root.
+3. Start `ssh -tt` with a generated POSIX bootstrap. When a copy is needed it runs
+   the uploaded bundle with its normal install/default-init behavior (never
+   `--install-init`), verifies `cptinit`, then moves the bundle into
+   `$remote_root/incoming/` as the cache and writes a marker. Otherwise it skips
+   installation and starts the shell directly.
+4. The bootstrap writes a temporary rc file that sources the user's normal rc
+   and then `$remote_root/cptinit.sh`: bash uses `--rcfile`, zsh uses a temporary
+   `ZDOTDIR`, and POSIX sh uses `ENV`. This loads PATH, environment variables and
+   shell functions without touching the real startup file.
+5. When the interactive shell exits, the bootstrap removes the temporary rc and,
+   only when `cleanup_on_exit` is true, removes `$remote_root` recursively. The
+   local `cpt` exits with the remote shell/SSH status.
+
+### Copy cache
+
+The target records `last_copied` and the SHA256 of the copied bundle. On connect,
+cpt copies and executes the bundle only when it is missing, older than 24 hours,
+the local bundle hash changed, the target's bundle/connection settings changed,
+or `cleanup_on_exit` is enabled. If the cached bundle is fresh, only the
+interactive shell is started with `cptinit`; the bundle is not re-run.
+
+- Rebuilding a bundle changes its hash, so the next connect copies and executes
+  it immediately.
+- If the remote bundle or `cptinit` vanished (manual deletion, wiped home), the
+  remote bootstrap exits with a dedicated code before installing; cpt re-copies
+  once and retries the same connection flow.
+- `cleanup_on_exit` deletes `$remote_root`, which contains the cached bundle.
+  Cleanup targets therefore ignore the copy cache and always copy and execute.
+
+The bootstrap is generated from validated fields, not concatenated from raw user
+input. Remote paths and names are single-quoted, the bootstrap applies
+`umask 077`, chmods the uploaded bundle to 0700, and executes a file the user
+owns. The remote root is not deleted on cleanup unless it was validated at
+save time.
+
+### CLI
+
+```bash
+cpt ssh                              # list targets
+cpt ssh list [--json]
+cpt ssh <target>                     # connect (interactive; terminal inherited)
+cpt ssh add <name> --bundle NAME --config-host ALIAS [options]
+cpt ssh add <name> --bundle NAME --host HOST [--user U] [--port N]
+cpt ssh edit <name> [options]
+cpt ssh remove <name>
+```
+
+Options mirror the schema: `--config-host`, `--host`, `--user`, `--port`,
+`--identity`, `--proxy-jump`, `--remote-root`, `--shell`, `--cleanup`, `--force`.
+`list`, `add`, `edit` and `remove` honour `--json`; `ssh <target>` is interactive
+and refuses `--json`. `--offline` blocks connecting but still allows local target
+management.
+
+### TUI
+
+- Tab order: **Packages · Lists · Bundles · SSH · Log**; `1`–`5` jump directly.
+- Left table: `NAME  SSH  BUNDLE  CLEANUP`. Right pane: bundle target/size,
+  effective `user@host:port`, identity/proxy source, shell, remote root, cleanup
+  and last connection.
+- `n` and `e` open a five-step wizard: name → connection source (searchable SSH
+  config aliases or custom server) → destination details → bundle picker →
+  shell/root/cleanup/force options. Editing pre-fills every value. `d` removes
+  the local target; `r` reloads the target file and SSH config aliases.
+- Connecting uses `tea.ExecProcess` for the full `cpt ssh` flow, so password
+  prompts and the interactive session own the real terminal. The TUI refreshes
+  targets and `last_connected` after the process exits.
+
+### Implementation shape
+
+- `internal/sshtarget/`: target schema/validation/store, SSH config discovery,
+  argv construction, remote bootstrap rendering.
+- `internal/app/ssh.go`: target CRUD, bundle lookup, connect orchestration and
+  locking.
+- `internal/cli/ssh.go`: `cpt ssh` subcommands and JSON envelopes.
+- `internal/tui/`: target table/detail, wizard and `tea.ExecProcess` handoff;
+  `snapshotMsg` carries targets.
+- `config.Paths` gains `SSHFile` (`<root>/ssh.json`) and `SSHLockFile`
+  (`<root>/.ssh.lock`).
+- `docs/ssh-targets.md`: schema, examples, security notes and remote behavior.
+
+### Safety and tests
+
+- The remote rc is never edited; a test asserts the generated remote command
+  never contains `--install-init` and never writes `.bashrc`/`.zshrc`.
+- Cleanup is opt-in, disabled by default, rejected for dangerous paths, and only
+  starts after the interactive shell has exited.
+- The copy cache respects bundle SHA256 and the 24-hour window; a fresh cache
+  starts only the shell with cptinit. Cleanup targets always copy and execute.
+  Tests cover fresh cache, changed bundle, missing remote file retry and cleanup
+  interaction.
+- Fake `ssh`/`scp` executables in tests capture argv and exercise config vs
+  custom targets, identity/port/proxy flags, missing bundles, offline mode,
+  cleanup on/off, platform mismatch and shell selection. The remote bootstrap is
+  golden-tested and syntax-checked with `sh -n`.
+- TUI model tests cover tab navigation, detail rendering, wizard create/edit,
+  prefill, delete confirmation and the connect command construction.
 
 ---
 
@@ -513,11 +711,14 @@ internal/state/          state.json, locking, migrations
 internal/shellinit/      bash/pwsh rendering, rc marker blocks, snippet resolution
 internal/app/shell.go    approval state machine and cptinit regeneration
 internal/bundle/         footer, build, run/unpack, self-truncate
+internal/sshtarget/      saved SSH targets, ssh config discovery, remote bootstrap
+internal/app/ssh.go     SSH target CRUD and connect orchestration
 internal/tui/            bubbletea model, tabs, views
 internal/progress/       shared event bus (TUI and CLI renderers)
 cpt.json                 master package list (repo root, by convention)
 docs/cpt-json.md         list schema reference
 docs/bundle-format.md    trailer + payload spec
+docs/ssh-targets.md      SSH target schema and remote execution contract
 install.sh               curl | sh installer
 ```
 
@@ -537,7 +738,8 @@ other.
 | **v0.3 M4** | bundle footer, build, run, frozen/live, cross-target base fetch, bundles tab | build arm64 bundle on amd64, run it in a temp HOME, re-run is idempotent |
 | **v0.4 M5** | Windows (zip, `.exe`, PowerShell init, file locking), darwin signing verdict, GC/doctor polish | CI green on windows/amd64 and darwin/arm64 |
 | **v0.4.1 M5.1 (done)** | TUI bundle/UI polish: two-column Bundles tab with included-package detail; `n`/`e` share a four-step wizard; selectable target platform and searchable package checklist; edit pre-fills every current value; one bracketed/yellow footer shortcut line; `[tab] switch tabs` header hint; untruncated prompt labels | create and edit bundles without typing platforms or package lists; selected bundle shows its included packages; no duplicate bundle shortcuts; `go test ./...` passes |
-| **v0.5 M6** | goreleaser, install.sh, self-update, docs, nightly list lint | tagged release installable via one-liner |
+| **v0.5 M6 (done)** | saved SSH targets: `ssh.json`, SSH config discovery, POSIX remote bootstrap, configurable remote root, `cpt ssh <target>`, daily bundle copy cache with fresh-cache shell-only sessions, session-scoped cptinit, opt-in remote-root cleanup, SSH tab + five-step wizard, full `list/add/edit/remove` CLI | create a target from `~/.ssh/config` or a custom host/user; `cpt ssh name` copies/executes only when needed and otherwise opens the shell with cptinit loaded; no remote rc file is modified; cleanup removes the remote root only when enabled; `go test ./...` passes |
+| **v0.6 M7** | goreleaser, install.sh, self-update, release docs, nightly list lint | tagged release installable via one-liner |
 
 ---
 
@@ -554,6 +756,10 @@ other.
 - **Network suite** (`-tags network`): the 25 entries across 5 targets, HEAD only.
 - **TUI:** model unit tests plus one scripted teatest session for search, select and
   install.
+- **SSH targets:** target validation and config parsing (including `Include`),
+  argv construction for config/custom targets, remote bootstrap golden tests,
+  fake `ssh`/`scp` end-to-end connect, no-`--install-init` assertion, cleanup
+  path guards and wizard create/edit tests.
 - **CI:** Linux/macOS/Windows test matrix, `goreleaser` on tags with checksums,
   nightly list lint.
 
@@ -587,6 +793,16 @@ other.
    manual pin, `type: url`.
 9. **GitHub HTML endpoints are not a contract.** The probe is isolated behind one
    interface, with `--offline` and a cached-tag fallback.
+10. **Remote shell startup differs by shell.** Session-scoped init uses a
+   temporary rc (`--rcfile`, `ZDOTDIR`, `ENV`) rather than editing the real rc.
+   Unknown shells fail loudly instead of opening a session without cptinit.
+11. **Cleanup can delete remote data.** It is opt-in, off by default, guarded
+   against `/`, top-level directories and `$HOME`, and only runs after the
+   interactive shell exits.
+12. **Bundle target and remote host can disagree.** The bundle's own platform
+   check remains authoritative; the bootstrap probes `uname` and fails before
+   installation with a clear os/arch mismatch, so the user rebuilds the bundle
+   for the remote platform.
 
 ---
 

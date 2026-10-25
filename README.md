@@ -14,9 +14,10 @@ cpt install fzf ripgrep jq
 
 ## Status
 
-This is milestone **v0.4 (M5)**: the core engine, the CLI, the master package
-list, shell integration, the interactive TUI, self-extracting bundles, and
-Windows/macOS platform support are complete.
+This is milestone **v0.5 (M6)**: the core engine, the CLI, the master package
+list, shell integration, the interactive TUI, self-extracting bundles,
+Windows/macOS platform support, and saved SSH targets are complete. Release
+engineering (goreleaser, installers, self-update) is M7.
 
 | Area | State |
 |---|---|
@@ -27,8 +28,9 @@ Windows/macOS platform support are complete.
 | Install, update, remove, pin, verify, doctor | done |
 | `cptinit` for bash/zsh/PowerShell, `init --install` | done |
 | Shell packages (inline and URL snippets) with approval | done |
-| Interactive TUI (packages, lists, bundles, log, progress, multi-select) | done |
+| Interactive TUI (packages, lists, bundles, SSH, log, progress, multi-select) | done |
 | Self-extracting bundles for remote machines (live and frozen) | done |
+| SSH targets combining `~/.ssh/config` or a custom host with a bundle | done |
 | Windows zip/`.exe` installs with `.new.exe` swap on restart | done |
 | PowerShell 5.1 and 7 init, profile editing and UTF-16 rc files | done |
 | Cross-platform state locking (flock / LockFileEx) | done |
@@ -81,8 +83,9 @@ Running `cpt` with no arguments in a terminal opens the TUI:
 cpt
 ```
 
-Tabs cover packages, lists, bundles and the log. Installs and updates run in the
-background with per-package spinners and an aggregate progress bar. Use
+Tabs cover packages, lists, bundles, SSH targets and the log. Installs and
+updates run in the background with per-package spinners and an aggregate
+progress bar. Use
 `space` to multi-select packages, `/` to search, `i` to install, `u` to update,
 `d` to remove, `X` to force-remove modified files, `p` to pin, `enter` for a
 full-screen detail view, and `?` for the complete key map. `esc` cancels a
@@ -93,8 +96,13 @@ opens a four-step wizard for both new and existing bundles (`n` / `e`), where th
 target platform and packages are chosen from selectable lists rather than typed
 in.
 
-The TUI never writes outside the terminal: progress events come from the same
-engine the CLI uses, and the log tab tails `~/.cpt/logs/cpt.log`. If cpt is run
+The SSH tab uses the same two-column layout. Targets are created from a
+searchable list of `~/.ssh/config` aliases or from a custom host/user form, then
+paired with an existing bundle. `c` or `enter` connects; the TUI hands the
+terminal to `cpt ssh` so password and key-passphrase prompts work normally.
+
+The TUI uses the same engine as the CLI: progress events come from that engine,
+and the log tab tails `~/.cpt/logs/cpt.log`. If cpt is run
 without a terminal (for example from a script or CI) or with `--no-tui`, it
 prints a short explanation and the command help instead.
 
@@ -102,8 +110,9 @@ prints a short explanation and the command help instead.
 fails, and installing anything not already present fails. Re-running `install`
 for a package that is already current is a no-op, so it works offline.
 
-List, search, info, install, update, remove, verify, doctor, `init`, `shell`
-and the `lists` subcommands accept `--json` and emit a stable envelope (help
+List, search, info, install, update, remove, verify, doctor, `init`, `shell`,
+`lists`, `bundle` and the `ssh` management subcommands accept `--json` and emit a
+stable envelope (help
 stays plain text; `cpt init <shell>` prints a raw script unless `--json` is
 given):
 
@@ -320,6 +329,34 @@ Building for another platform downloads the matching cpt release into
 locally cross-compiled one). See [docs/bundle-format.md](docs/bundle-format.md)
 for the container and payload format.
 
+## SSH targets
+
+An SSH target pairs one saved bundle with one SSH destination. Connecting copies
+the bundle to the remote host, installs or refreshes the remote `~/.cpt`, and
+opens an interactive shell with `cptinit` loaded for that session. It never edits
+the remote `.bashrc`, `.zshrc` or profile, and it never runs `--install-init`.
+
+```sh
+cpt ssh add staging --bundle devbox --config-host staging-box
+cpt ssh add lab --bundle devbox --host 10.0.0.7 --user mike --port 2222
+cpt ssh staging
+cpt ssh list
+cpt ssh edit staging --shell zsh
+cpt ssh remove staging
+```
+
+Targets are stored in `~/.cpt/ssh.json`. A target can reference an OpenSSH config
+alias or an explicit host/user/port/identity/ProxyJump combination. The remote
+root defaults to `~/.cpt` and can be changed per target.
+
+The remote bundle copy is cached locally and on the remote host for 24 hours
+unless cleanup is enabled. A fresh cache opens only the shell with `cptinit`; a
+rebuilt bundle or changed connection settings makes the next connect copy and
+run it again. `--cleanup` removes the remote root after the shell exits; it is
+off by default. M6 supports Linux/macOS remotes with `bash`, `zsh` or `sh`. See
+[docs/ssh-targets.md](docs/ssh-targets.md) for the schema, safety rules and remote
+bootstrap details.
+
 ## Windows and macOS
 
 On Windows, archives are unpacked from zip or tar.gz and installed as `.exe`
@@ -353,7 +390,9 @@ writable.
 ~/.cpt/
 ├── config.json      # optional; defaults are built in
 ├── state.json       # installed packages, hashes, list metadata, snippet approval
+├── ssh.json         # saved SSH targets (bundle + destination)
 ├── .lock            # OS-level lock: one mutating cpt at a time
+├── .ssh.lock        # serializes SSH target-file updates
 ├── bin/             # every installed binary lives here
 ├── lists/           # core.json and any lists you add
 ├── cache/probe/     # cached upstream tags

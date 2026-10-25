@@ -248,6 +248,10 @@ func TestModelTabsAndPrompt(t *testing.T) {
 		t.Fatalf("tab = %v, want bundles", m.tab)
 	}
 	send(m, "4")
+	if m.tab != tabSSH {
+		t.Fatalf("tab = %v, want ssh", m.tab)
+	}
+	send(m, "5")
 	if m.tab != tabLog {
 		t.Fatalf("tab = %v, want log", m.tab)
 	}

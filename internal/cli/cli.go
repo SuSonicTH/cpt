@@ -169,6 +169,8 @@ func dispatch(ctx context.Context, a *app.App, cmd string, args []string) error 
 	switch cmd {
 	case "bundle", "bundles":
 		return cmdBundle(ctx, a, args)
+	case "ssh":
+		return cmdSSH(ctx, a, args)
 	case "list", "ls":
 		return cmdList(ctx, a, args)
 	case "search":

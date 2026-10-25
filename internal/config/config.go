@@ -67,19 +67,21 @@ func Defaults() *Config {
 
 // Paths describes every location cpt uses under its root directory.
 type Paths struct {
-	Root       string
-	Bin        string
-	Lists      string
-	Cache      string
-	ProbeCache string
-	ShellCache string
-	SelfCache  string
-	Bundles    string
-	Logs       string
-	Tmp        string
-	ConfigFile string
-	StateFile  string
-	LockFile   string
+	Root        string
+	Bin         string
+	Lists       string
+	Cache       string
+	ProbeCache  string
+	ShellCache  string
+	SelfCache   string
+	Bundles     string
+	Logs        string
+	Tmp         string
+	ConfigFile  string
+	StateFile   string
+	SSHFile     string
+	LockFile    string
+	SSHLockFile string
 }
 
 // DefaultRoot returns CPT_ROOT when set, then CPT_HOME, otherwise ~/.cpt.
@@ -103,19 +105,21 @@ func DefaultRoot() (string, error) {
 func NewPaths(root string) Paths {
 	root, _ = filepath.Abs(root)
 	return Paths{
-		Root:       root,
-		Bin:        filepath.Join(root, "bin"),
-		Lists:      filepath.Join(root, "lists"),
-		Cache:      filepath.Join(root, "cache"),
-		ProbeCache: filepath.Join(root, "cache", "probe"),
-		ShellCache: filepath.Join(root, "cache", "shell"),
-		SelfCache:  filepath.Join(root, "cache", "self"),
-		Bundles:    filepath.Join(root, "bundles"),
-		Logs:       filepath.Join(root, "logs"),
-		Tmp:        filepath.Join(root, "tmp"),
-		ConfigFile: filepath.Join(root, "config.json"),
-		StateFile:  filepath.Join(root, "state.json"),
-		LockFile:   filepath.Join(root, ".lock"),
+		Root:        root,
+		Bin:         filepath.Join(root, "bin"),
+		Lists:       filepath.Join(root, "lists"),
+		Cache:       filepath.Join(root, "cache"),
+		ProbeCache:  filepath.Join(root, "cache", "probe"),
+		ShellCache:  filepath.Join(root, "cache", "shell"),
+		SelfCache:   filepath.Join(root, "cache", "self"),
+		Bundles:     filepath.Join(root, "bundles"),
+		Logs:        filepath.Join(root, "logs"),
+		Tmp:         filepath.Join(root, "tmp"),
+		ConfigFile:  filepath.Join(root, "config.json"),
+		StateFile:   filepath.Join(root, "state.json"),
+		SSHFile:     filepath.Join(root, "ssh.json"),
+		LockFile:    filepath.Join(root, ".lock"),
+		SSHLockFile: filepath.Join(root, ".ssh.lock"),
 	}
 }
 

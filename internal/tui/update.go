@@ -44,6 +44,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.lists = sanitizeLists(msg.lists)
 		m.bundles = sanitizeBundles(msg.bundles)
+		m.sshTargets = sanitizeSSHTargets(msg.sshTargets)
+		m.sshHosts = msg.sshHosts
+		m.sshHostsErr = ""
+		if msg.sshHostErr != nil {
+			m.sshHostsErr = sanitize(msg.sshHostErr.Error(), false)
+		}
 		m.shells = sanitizeShells(msg.shells)
 		m.pendingShells = msg.pending
 		if m.listCursor >= len(m.lists) {
@@ -60,6 +66,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.bundleCursor = 0
 		}
 		m.ensureBundleVisible(m.bundleTableHeight())
+		if m.sshCursor >= len(m.sshTargets) {
+			m.sshCursor = len(m.sshTargets) - 1
+		}
+		if m.sshCursor < 0 {
+			m.sshCursor = 0
+		}
+		m.ensureSSHVisible(m.sshTableHeight())
 		for name := range m.selected {
 			found := false
 			for i := range m.rows {
@@ -247,9 +260,13 @@ func (m *Model) resize() {
 		m.bundleDraft.nameInput.Width = maxInt(10, m.width-10)
 		m.bundleDraft.search.Width = maxInt(10, m.width-14)
 	}
+	if m.sshDraft != nil {
+		m.resizeSSHDraft()
+	}
 	m.ensureCursorVisible(body)
 	m.ensureListVisible(m.listTableHeight())
 	m.ensureBundleVisible(m.bundleTableHeight())
+	m.ensureSSHVisible(m.sshTableHeight())
 	if m.overlay == overlayShell {
 		m.ensureShellVisible(m.shellListHeight())
 		m.wrapShellDiff()
@@ -375,6 +392,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.bundleDraft != nil {
 		return m.handleBundleWizardKey(msg)
 	}
+	if m.sshDraft != nil {
+		return m.handleSSHWizardKey(msg)
+	}
 	if m.prompt != nil {
 		return m.handlePromptKey(msg)
 	}
@@ -430,6 +450,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "3":
 		return m, m.setTab(tabBundles)
 	case "4":
+		return m, m.setTab(tabSSH)
+	case "5":
 		return m, m.setTab(tabLog)
 	case "esc":
 		if m.running {
@@ -462,6 +484,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleListsKey(msg)
 	case tabBundles:
 		return m.handleBundlesKey(msg)
+	case tabSSH:
+		return m.handleSSHKey(msg)
 	case tabLog:
 		return m.handleLogKey(msg)
 	}
@@ -1358,6 +1382,10 @@ func (m *Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.clearStatus()
 			m.loadingRows = true
 			return m, bundleRemoveCmd(m.ctx, m.app, p.list)
+		case promptRemoveSSH:
+			m.clearStatus()
+			m.loadingRows = true
+			return m, sshDeleteCmd(m.ctx, m.app, p.list)
 		}
 		return m, nil
 	default:

@@ -52,10 +52,17 @@ func KindOf(err error) Kind {
 	return Generic
 }
 
-// ExitCode returns the process exit code for err.
+// ExitCode returns the process exit code for err. Errors may carry an explicit
+// exit status (interactive SSH sessions do) before the cerr kind is considered.
 func ExitCode(err error) int {
 	if err == nil {
 		return 0
+	}
+	var ec interface{ ExitCode() int }
+	if errors.As(err, &ec) {
+		if code := ec.ExitCode(); code > 0 && code < 256 {
+			return code
+		}
 	}
 	return int(KindOf(err))
 }

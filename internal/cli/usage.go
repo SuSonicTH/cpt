@@ -21,6 +21,7 @@ Commands:
   shell [subcommand]       Review shell snippets (list, diff, approve, reject)
   lists [subcommand]       Manage package lists (add, remove, refresh, show, lint)
   bundle [subcommand]      Build self-extracting bundles (create, rebuild, list, run)
+  ssh [subcommand]         Manage SSH targets (list, add, edit, remove) or connect
   version                  Print version information
   help                     Show this help
 
@@ -51,6 +52,8 @@ Examples:
   cpt shell approve fzf
   cpt bundle create devbox --packages fzf,jq --target linux/arm64 --frozen
   cpt bundle rebuild devbox
+  cpt ssh add staging --bundle devbox --config-host staging-box
+  cpt ssh staging
 `
 
 const shellUsage = `cpt shell — review and approve shell snippets

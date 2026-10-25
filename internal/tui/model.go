@@ -13,6 +13,7 @@ import (
 	"github.com/SuSonicTH/cpt/internal/app"
 	"github.com/SuSonicTH/cpt/internal/platform"
 	"github.com/SuSonicTH/cpt/internal/progress"
+	"github.com/SuSonicTH/cpt/internal/sshtarget"
 )
 
 type tab int
@@ -21,10 +22,11 @@ const (
 	tabPackages tab = iota
 	tabLists
 	tabBundles
+	tabSSH
 	tabLog
 )
 
-var tabNames = []string{"Packages", "Lists", "Bundles", "Log"}
+var tabNames = []string{"Packages", "Lists", "Bundles", "SSH", "Log"}
 
 func (t tab) String() string {
 	if t >= 0 && int(t) < len(tabNames) {
@@ -46,6 +48,7 @@ const (
 	promptBundlePackages
 	promptBundleFrozen
 	promptRemoveBundle
+	promptRemoveSSH
 )
 
 type promptState struct {
@@ -206,6 +209,13 @@ type Model struct {
 	bundleCursor int
 	bundleOffset int
 	bundleDraft  *bundleDraft
+
+	sshTargets  []app.SSHTargetInfo
+	sshHosts    []sshtarget.ConfigHost
+	sshHostsErr string
+	sshCursor   int
+	sshOffset   int
+	sshDraft    *sshDraft
 
 	logLines   []string
 	liveLog    []string

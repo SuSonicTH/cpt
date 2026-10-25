@@ -48,6 +48,12 @@ func (m *Model) View() string {
 			} else {
 				body = m.viewBundles(width, bodyHeight)
 			}
+		case tabSSH:
+			if m.sshDraft != nil {
+				body = m.viewSSHWizard(width, bodyHeight)
+			} else {
+				body = m.viewSSH(width, bodyHeight)
+			}
 		case tabLog:
 			body = m.viewLog(width, bodyHeight)
 		}
@@ -777,6 +783,9 @@ func (m *Model) activitySummary() string {
 }
 
 func (m *Model) helpLine() string {
+	if m.sshDraft != nil {
+		return m.sshWizardHelpLine()
+	}
 	if m.bundleDraft != nil {
 		switch m.bundleDraft.step {
 		case bundleStepName:
@@ -817,6 +826,9 @@ func (m *Model) helpLine() string {
 	case tabBundles:
 		return hintLine(keyHint("n", "new"), keyHint("e", "edit"), keyHint("r", "rebuild"),
 			keyHint("d", "remove"), keyHint("enter", "path"), keyHint("q", "quit"))
+	case tabSSH:
+		return hintLine(keyHint("n", "new"), keyHint("e", "edit"), keyHint("c", "connect"),
+			keyHint("d", "remove"), keyHint("enter", "connect"), keyHint("r", "refresh"), keyHint("q", "quit"))
 	case tabLog:
 		return hintLine(keyHint("↑/↓", "scroll"), keyHint("pgup/pgdn", ""), keyHint("g/G", "top/bottom"),
 			keyHint("tab", "switch"), keyHint("q", "quit"))
@@ -829,7 +841,7 @@ func (m *Model) viewHelp(width, height int) string {
 		styleTitle.Render("cpt keys"),
 		"",
 		styleAccent.Render("Global"),
-		"  tab / shift+tab   switch tabs (1, 2, 3, 4 jump directly)",
+		"  tab / shift+tab   switch tabs (1–5 jump directly)",
 		"  ?                 toggle this help",
 		"  q / ctrl+c        quit",
 		"  esc               cancel an operation, clear search or selection",
@@ -859,6 +871,13 @@ func (m *Model) viewHelp(width, height int) string {
 		"  r                 rebuild the selected bundle from its exact versions",
 		"  d                 delete the selected bundle and its manifest",
 		"  enter             show the bundle file path",
+		"",
+		styleAccent.Render("SSH"),
+		"  n                 create a target (name, SSH source, destination, bundle, options)",
+		"  e                 edit the selected target",
+		"  c / enter         connect; copy and run the bundle when the cache is stale",
+		"  d                 delete the local target",
+		"  r                 reload targets and ~/.ssh/config hosts",
 		"",
 		styleAccent.Render("Log"),
 		"  ↑/↓, pgup/pgdn    scroll · g/G top/bottom",

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -13,16 +14,20 @@ import (
 
 	"github.com/SuSonicTH/cpt/internal/app"
 	"github.com/SuSonicTH/cpt/internal/progress"
+	"github.com/SuSonicTH/cpt/internal/sshtarget"
 )
 
 type snapshotMsg struct {
-	rows    []app.Row
-	lists   []app.ListInfo
-	bundles []app.BundleInfo
-	shells  []app.ShellInfo
-	pending int
-	err     error
-	initial bool
+	rows       []app.Row
+	lists      []app.ListInfo
+	bundles    []app.BundleInfo
+	sshTargets []app.SSHTargetInfo
+	sshHosts   []sshtarget.ConfigHost
+	sshHostErr error
+	shells     []app.ShellInfo
+	pending    int
+	err        error
+	initial    bool
 }
 
 type logMsg struct {
@@ -73,13 +78,22 @@ func waitEventCmd(ch <-chan progress.Event, done <-chan struct{}) tea.Cmd {
 func snapshot(a *app.App, ctx context.Context, probe bool) snapshotMsg {
 	rows, err := a.Rows(ctx, app.ListOptions{Updates: probe})
 	bundles, _ := a.Bundles()
+	sshTargets, sshErr := a.SSHTargets(ctx)
+	sshHosts, hostsErr := a.SSHConfigHosts()
+	if sshErr != nil {
+		sshHosts = nil
+		hostsErr = sshErr
+	}
 	return snapshotMsg{
-		rows:    rows,
-		lists:   a.Lists(),
-		bundles: bundles,
-		shells:  a.ShellInfos(),
-		pending: a.PendingShellCount(),
-		err:     err,
+		rows:       rows,
+		lists:      a.Lists(),
+		bundles:    bundles,
+		sshTargets: sshTargets,
+		sshHosts:   sshHosts,
+		sshHostErr: hostsErr,
+		shells:     a.ShellInfos(),
+		pending:    a.PendingShellCount(),
+		err:        err,
 	}
 }
 
@@ -101,6 +115,12 @@ func reloadCmd(ctx context.Context, a *app.App, refresh bool) tea.Cmd {
 		}
 		return snapshot(a, ctx, true)
 	}
+}
+
+// reloadTargetsCmd refreshes SSH targets and the host list without probing
+// package updates.
+func reloadTargetsCmd(ctx context.Context, a *app.App) tea.Cmd {
+	return func() tea.Msg { return snapshot(a, ctx, false) }
 }
 
 func readLogCmd(logDir string) tea.Cmd {
@@ -287,6 +307,45 @@ func bundleRebuildCmd(ctx context.Context, a *app.App, name string) tea.Cmd {
 			warnings: res.Warnings,
 		}
 	}
+}
+
+func sshTargetSaveCmd(ctx context.Context, a *app.App, t *sshtarget.Target) tea.Cmd {
+	return func() tea.Msg {
+		if err := a.SaveSSHTarget(t); err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{status: "saved SSH target " + t.Name}
+	}
+}
+
+func sshDeleteCmd(ctx context.Context, a *app.App, name string) tea.Cmd {
+	return func() tea.Msg {
+		if _, err := a.RemoveSSHTarget(name); err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{status: "removed SSH target " + name}
+	}
+}
+
+func sshConnectProcess(a *app.App, name string) (*exec.Cmd, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	return exec.Command(self, "--root", a.Paths.Root, "ssh", name), nil
+}
+
+func sshConnectCmd(a *app.App, name string) tea.Cmd {
+	cmd, err := sshConnectProcess(a, name)
+	if err != nil {
+		return func() tea.Msg { return actionDoneMsg{err: err} }
+	}
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		if err != nil {
+			return actionDoneMsg{status: "SSH session closed", err: err}
+		}
+		return actionDoneMsg{status: "SSH session closed"}
+	})
 }
 
 func bundleRemoveCmd(ctx context.Context, a *app.App, name string) tea.Cmd {

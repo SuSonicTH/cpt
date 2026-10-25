@@ -61,3 +61,33 @@ func sanitizeShells(shells []app.ShellInfo) []app.ShellInfo {
 	}
 	return out
 }
+
+func sanitizeSSHTargets(targets []app.SSHTargetInfo) []app.SSHTargetInfo {
+	out := make([]app.SSHTargetInfo, len(targets))
+	for i, t := range targets {
+		t.Name = sanitize(t.Name, false)
+		t.Bundle = sanitize(t.Bundle, false)
+		t.SSH.Source = sanitize(t.SSH.Source, false)
+		t.SSH.Host = sanitize(t.SSH.Host, false)
+		t.SSH.User = sanitize(t.SSH.User, false)
+		t.SSH.IdentityFile = sanitize(t.SSH.IdentityFile, false)
+		t.SSH.ProxyJump = sanitize(t.SSH.ProxyJump, false)
+		t.RemoteRoot = sanitize(t.RemoteRoot, false)
+		t.RemoteRootDisplay = sanitize(t.RemoteRootDisplay, false)
+		t.Destination = sanitize(t.Destination, false)
+		t.BundlePath = sanitize(t.BundlePath, false)
+		t.BundleTarget = sanitize(t.BundleTarget, false)
+		t.ResolveError = sanitize(t.ResolveError, false)
+		if t.Resolved != nil {
+			resolved := *t.Resolved
+			resolved.Alias = sanitize(resolved.Alias, false)
+			resolved.HostName = sanitize(resolved.HostName, false)
+			resolved.User = sanitize(resolved.User, false)
+			resolved.IdentityFile = sanitize(resolved.IdentityFile, false)
+			resolved.ProxyJump = sanitize(resolved.ProxyJump, false)
+			t.Resolved = &resolved
+		}
+		out[i] = t
+	}
+	return out
+}
