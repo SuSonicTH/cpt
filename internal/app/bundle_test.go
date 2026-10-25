@@ -49,6 +49,9 @@ func TestBuildBundleAndRunIt(t *testing.T) {
 	if err != nil || len(infos) != 1 || infos[0].Packages != 1 {
 		t.Fatalf("Bundles: %v %+v", err, infos)
 	}
+	if len(infos[0].PackageNames) != 1 || infos[0].PackageNames[0] != "tool" {
+		t.Fatalf("bundle package names: %+v", infos[0].PackageNames)
+	}
 
 	dest := filepath.Join(t.TempDir(), ".cpt")
 	run, err := bundle.Run(context.Background(), res.Path, bundle.RunOptions{Dest: dest})

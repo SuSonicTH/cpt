@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/SuSonicTH/cpt/internal/app"
+	"github.com/SuSonicTH/cpt/internal/platform"
 	"github.com/SuSonicTH/cpt/internal/version"
 )
 
@@ -42,7 +43,11 @@ func (m *Model) View() string {
 		case tabLists:
 			body = m.viewLists(width, bodyHeight)
 		case tabBundles:
-			body = m.viewBundles(width, bodyHeight)
+			if m.bundleDraft != nil {
+				body = m.viewBundleWizard(width, bodyHeight)
+			} else {
+				body = m.viewBundles(width, bodyHeight)
+			}
 		case tabLog:
 			body = m.viewLog(width, bodyHeight)
 		}
@@ -60,7 +65,8 @@ func (m *Model) viewHeader(width int) string {
 			tabs = append(tabs, styleTabOff.Render(name))
 		}
 	}
-	left := styleTitle.Render("cpt") + " " + styleDim.Render(version.Version) + "   " + strings.Join(tabs, "  ")
+	left := styleTitle.Render("cpt") + " " + styleDim.Render(version.Version) + "      " +
+		strings.Join(tabs, "  ") + "   " + keyHint("tab", "switch tabs")
 	var badges []string
 	if n := m.updateCount(); n > 0 {
 		badges = append(badges, styleBadge.Render(fmt.Sprintf("%d updates", n)))
@@ -396,25 +402,32 @@ func (m *Model) viewShell(width, height int) string {
 }
 
 func (m *Model) viewBundles(width, height int) string {
-	lines := []string{
-		styleDim.Render(padRight(fmt.Sprintf("%-18s %-14s %-9s %-10s %-12s %s", "NAME", "TARGET", "PACKAGES", "SIZE", "CREATED", "KIND"), width)),
+	if width < 60 {
+		return strings.Join(fitLines(m.bundleListLines(width, height), width, height), "\n")
 	}
-	tableRows := maxInt(3, height-8)
+	leftWidth := width * 60 / 100
+	leftWidth = maxInt(54, leftWidth)
+	leftWidth = minInt(leftWidth, width-24)
+	rightWidth := width - leftWidth - 1
+	left := strings.Join(fitLines(m.bundleListLines(leftWidth, height), leftWidth, height), "\n")
+	right := strings.Join(fitLines(m.bundleDetailLines(rightWidth), rightWidth, height), "\n")
+	return joinColumns(left, right, leftWidth, height)
+}
+
+func (m *Model) bundleListLines(width, height int) []string {
+	lines := []string{
+		styleDim.Render(padRight(fmt.Sprintf("%-18s %-14s %-9s %s", "NAME", "TARGET", "PACKAGES", "SIZE"), width)),
+	}
+	tableRows := maxInt(1, height-1)
 	end := minInt(len(m.bundles), m.bundleOffset+tableRows)
 	for i := m.bundleOffset; i < end; i++ {
 		b := &m.bundles[i]
-		kind := "live"
-		kindStyle := "dim"
-		if b.Frozen {
-			kind = "frozen"
-			kindStyle = "warn"
-		}
-		line := fmt.Sprintf("%-18s %-14s %-9d %-10s %-12s %s",
-			truncate(b.Name, 18), b.Target, b.Packages, formatSize(b.Size), humanAge(b.Created), kind)
+		line := fmt.Sprintf("%-18s %-14s %-9d %s",
+			truncate(b.Name, 18), b.Target, b.Packages, formatSize(b.Size))
 		line = truncate(line, width)
 		if i == m.bundleCursor {
 			line = styleSelect.Render(padRight(line, width))
-		} else if kindStyle == "warn" {
+		} else if b.Frozen {
 			line = styleWarn.Render(line)
 		}
 		lines = append(lines, line)
@@ -422,21 +435,218 @@ func (m *Model) viewBundles(width, height int) string {
 	if len(m.bundles) == 0 {
 		lines = append(lines, styleDim.Render("no bundles built yet; press n to create one"))
 	}
-	lines = append(lines, "")
-	if b := m.currentBundle(); b != nil {
-		lines = append(lines, styleTitle.Render(b.Name))
-		lines = append(lines, wrapText(b.Path, width, 0)...)
-		detail := fmt.Sprintf("%s · %d packages · %s · built %s", b.Target, b.Packages, frozenLabel(b.Frozen), humanAge(b.Created))
-		lines = append(lines, styleDim.Render(detail))
-		lines = append(lines, styleDim.Render("manifest: "+b.Manifest))
-		if b.Frozen {
-			lines = append(lines, styleDim.Render("frozen: cpt update explains itself until --unfreeze"))
+	return lines
+}
+
+func (m *Model) bundleDetailLines(width int) []string {
+	width = maxInt(10, width)
+	b := m.currentBundle()
+	if b == nil {
+		return []string{styleDim.Render("nothing selected")}
+	}
+	lines := []string{styleTitle.Render(truncate(b.Name, width))}
+	lines = append(lines, wrapText(b.Path, width, 0)...)
+	add := func(label, value string) {
+		if value == "" {
+			return
+		}
+		lines = append(lines, styleDim.Render(label+":")+" "+truncate(value, maxInt(4, width-len(label)-2)))
+	}
+	add("target", b.Target)
+	add("mode", frozenLabel(b.Frozen))
+	add("packages", fmt.Sprintf("%d", b.Packages))
+	add("size", formatSize(b.Size))
+	add("created", humanAge(b.Created))
+	add("manifest", b.Manifest)
+	if b.Frozen {
+		lines = append(lines, styleDim.Render("frozen: cpt update explains itself until --unfreeze"))
+	}
+	lines = append(lines, "", styleAccent.Render("Included packages"))
+	if len(b.PackageNames) == 0 {
+		lines = append(lines, styleDim.Render("no packages recorded"))
+	} else {
+		for _, name := range b.PackageNames {
+			lines = append(lines, truncate("  • "+name, width))
 		}
 	}
-	if m.bundleDraft != nil {
-		lines = append(lines, "", styleAccent.Render("bundle wizard: "+m.bundleDraft.name+" → "+m.bundleDraft.target))
+	return lines
+}
+
+func (m *Model) viewBundleWizard(width, height int) string {
+	d := m.bundleDraft
+	if d == nil {
+		return ""
 	}
-	lines = append(lines, "", styleDim.Render("n new · r rebuild · d remove · enter path · tab switch · q quit"))
+	switch d.step {
+	case bundleStepName:
+		lines := []string{
+			styleTitle.Render("New bundle"),
+			styleDim.Render("Step 1 of 4 · name"),
+			"",
+			styleAccent.Render("Bundle name"),
+			"  " + d.nameInput.View(),
+			"",
+		}
+		if d.err != "" {
+			lines = append(lines, styleErr.Render(d.err))
+		} else {
+			lines = append(lines, styleDim.Render("A short identifier such as devbox."))
+		}
+		return strings.Join(fitLines(lines, width, height), "\n")
+
+	case bundleStepTarget:
+		lines := []string{
+			styleTitle.Render("New bundle: " + d.name),
+			styleDim.Render("Step 2 of 4 · target platform"),
+			"",
+			styleAccent.Render("Target platform"),
+			"",
+		}
+		current := platform.Current()
+		for i, p := range bundleTargets() {
+			label := p.String()
+			if p == current {
+				label += "  (current)"
+			}
+			marker := "( )"
+			if i == d.targetCursor {
+				marker = "(•)"
+			}
+			line := "  " + marker + " " + label
+			if i == d.targetCursor {
+				line = styleSelect.Render(padRight(line, width))
+			}
+			lines = append(lines, line)
+		}
+		lines = append(lines, "", styleDim.Render("Packages are filtered to the selected platform."))
+		if d.err != "" {
+			lines = append(lines, "", styleErr.Render(d.err))
+		}
+		return strings.Join(fitLines(lines, width, height), "\n")
+
+	case bundleStepPackages:
+		return m.viewBundleWizardPackages(width, height)
+
+	case bundleStepMode:
+		return m.viewBundleWizardMode(width, height)
+	}
+	return ""
+}
+
+func (m *Model) viewBundleWizardPackages(width, height int) string {
+	d := m.bundleDraft
+	lines := []string{
+		styleTitle.Render("New bundle: " + d.name),
+		styleDim.Render("Step 3 of 4 · packages"),
+		"",
+		styleAccent.Render("Packages for " + d.target),
+		styleDim.Render(fmt.Sprintf("%d selected · %d available", len(d.selectedPackages()), len(d.candidates))),
+	}
+	if d.err != "" {
+		lines = append(lines, styleErr.Render(d.err))
+	}
+	switch {
+	case d.searching:
+		lines = append(lines, "Search: "+d.search.View())
+	case d.query != "":
+		lines = append(lines, "Search: "+d.query)
+	default:
+		lines = append(lines, styleDim.Render("Press / to search this list."))
+	}
+	lines = append(lines, "")
+
+	visible := m.bundleVisibleCandidates(d)
+	if len(visible) == 0 {
+		if d.query != "" {
+			lines = append(lines, styleDim.Render("no packages match "+d.query))
+		} else {
+			lines = append(lines, styleDim.Render("no packages support "+d.target))
+		}
+		return strings.Join(fitLines(lines, width, height), "\n")
+	}
+	if d.packageOffset >= len(visible) {
+		d.packageOffset = maxInt(0, len(visible)-1)
+	}
+	listHeight := maxInt(1, height-len(lines)-1)
+	end := minInt(len(visible), d.packageOffset+listHeight)
+	for i := d.packageOffset; i < end; i++ {
+		c := &d.candidates[visible[i]]
+		line := m.bundlePackageLine(c, width, i == d.packageCursor)
+		if i == d.packageCursor {
+			line = styleSelect.Render(padRight(line, width))
+		} else if c.Conflict {
+			line = styleErr.Render(line)
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(fitLines(lines, width, height), "\n")
+}
+
+func (m *Model) bundlePackageLine(c *bundleCandidate, width int, cursor bool) string {
+	marker := "  "
+	if cursor {
+		marker = "▸ "
+	}
+	check := "[ ]"
+	if m.bundleDraft != nil && m.bundleDraft.selected[c.Name] {
+		check = "[x]"
+	}
+	glyph := "○"
+	if c.Installed {
+		glyph = "●"
+	}
+	if c.Conflict {
+		glyph = "✗"
+	}
+	nameWidth := minInt(28, maxInt(10, width/4))
+	descWidth := width - 9 - nameWidth
+	line := marker + check + " " + glyph + " " + padRight(truncate(c.Name, nameWidth), nameWidth)
+	if descWidth > 4 && c.Description != "" {
+		line += " " + truncate(c.Description, descWidth)
+	}
+	return truncate(line, width)
+}
+
+func (m *Model) viewBundleWizardMode(width, height int) string {
+	d := m.bundleDraft
+	lines := []string{
+		styleTitle.Render("New bundle: " + d.name),
+		styleDim.Render("Step 4 of 4 · mode and build"),
+		"",
+	}
+	add := func(label, value string) {
+		lines = append(lines, styleAccent.Render(label), "  "+value)
+	}
+	add("Target", d.target)
+	packages := d.selectedPackages()
+	add("Packages", fmt.Sprintf("%d selected", len(packages)))
+	if len(packages) > 0 {
+		lines = append(lines, wrapText(strings.Join(packages, ", "), width-2, 2)...)
+	}
+	lines = append(lines, "", styleAccent.Render("Mode"), "")
+	modes := []struct {
+		name string
+		desc string
+	}{
+		{"live", "lists stay writable so cpt update works on the target"},
+		{"frozen", "lists are read-only; cpt update explains until --unfreeze"},
+	}
+	for i, mode := range modes {
+		marker := "( )"
+		if i == d.modeCursor {
+			marker = "(•)"
+		}
+		line := "  " + marker + " " + mode.name + " — " + mode.desc
+		if i == d.modeCursor {
+			line = styleSelect.Render(padRight(line, width))
+		} else {
+			line = truncate(line, width)
+		}
+		lines = append(lines, line)
+	}
+	if d.err != "" {
+		lines = append(lines, "", styleErr.Render(d.err))
+	}
 	return strings.Join(fitLines(lines, width, height), "\n")
 }
 
@@ -466,7 +676,24 @@ func (m *Model) viewFooter(width int) string {
 
 func (m *Model) statusLine(width int) string {
 	if m.prompt != nil {
-		return styleAccent.Render(truncate(m.prompt.title, maxInt(10, width-lipgloss.Width(m.prompt.input.View())-3))) + ": " + m.prompt.input.View()
+		title := m.prompt.title
+		// Keep the label intact. The input may scroll or be clipped, but a
+		// prompt that reads "target platfo…" is never helpful.
+		avail := width - lipgloss.Width(title) - 3
+		if avail < 10 {
+			avail = 10
+		}
+		if m.prompt.input.Width > avail {
+			m.prompt.input.Width = avail
+		}
+		line := styleAccent.Render(title) + ": " + m.prompt.input.View()
+		if lipgloss.Width(line) > width {
+			if lipgloss.Width(title)+1 >= width {
+				return styleAccent.Render(title)
+			}
+			return truncate(line, width)
+		}
+		return line
 	}
 	text := m.status
 	isErr := m.statusErr
@@ -550,29 +777,51 @@ func (m *Model) activitySummary() string {
 }
 
 func (m *Model) helpLine() string {
+	if m.bundleDraft != nil {
+		switch m.bundleDraft.step {
+		case bundleStepName:
+			return hintLine(keyHint("enter", "next"), keyHint("esc", "cancel"))
+		case bundleStepTarget:
+			return hintLine(keyHint("↑/↓", "choose"), keyHint("enter", "next"),
+				keyHint("shift+tab", "back"), keyHint("esc", "cancel"))
+		case bundleStepPackages:
+			return hintLine(keyHint("/", "search"), keyHint("space", "select"), keyHint("a", "all"),
+				keyHint("enter", "next"), keyHint("shift+tab", "back"), keyHint("esc", "cancel"))
+		case bundleStepMode:
+			return hintLine(keyHint("↑/↓", "choose"), keyHint("enter", "build"),
+				keyHint("shift+tab", "back"), keyHint("esc", "cancel"))
+		}
+	}
 	if m.prompt != nil {
-		return "enter confirm · esc cancel"
+		return hintLine(keyHint("enter", "confirm"), keyHint("esc", "cancel"))
 	}
 	if m.overlay == overlayShell {
-		return "↑/↓ select · pgup/pgdn scroll · A approve · R reject · a approve all · x reject all · esc close"
+		return hintLine(keyHint("↑/↓", "select"), keyHint("pgup/pgdn", "scroll"),
+			keyHint("A", "approve"), keyHint("R", "reject"), keyHint("a", "approve all"),
+			keyHint("x", "reject all"), keyHint("esc", "close"))
 	}
 	if m.overlay == overlayDetail {
-		return "↑/↓ scroll · pgup/pgdn · esc close"
+		return hintLine(keyHint("↑/↓", "scroll"), keyHint("pgup/pgdn", ""), keyHint("esc", "close"))
 	}
 	if m.running {
-		return "esc cancel · q quit"
+		return hintLine(keyHint("esc", "cancel"), keyHint("q", "quit"))
 	}
 	switch m.tab {
 	case tabPackages:
-		return "/ search · space select · a all updates · i install · u update · d remove · p pin · enter detail · r refresh · q quit"
+		return hintLine(keyHint("/", "search"), keyHint("space", "select"), keyHint("a", "all updates"),
+			keyHint("i", "install"), keyHint("u", "update"), keyHint("d", "remove"),
+			keyHint("p", "pin"), keyHint("enter", "detail"), keyHint("r", "refresh"), keyHint("q", "quit"))
 	case tabLists:
-		return "n add · r refresh · R refresh all · x remove · s shell changes · tab switch · q quit"
+		return hintLine(keyHint("n", "add"), keyHint("r", "refresh"), keyHint("R", "refresh all"),
+			keyHint("x", "remove"), keyHint("s", "shell changes"), keyHint("tab", "switch"), keyHint("q", "quit"))
 	case tabBundles:
-		return "n new · r rebuild · d remove · enter path · tab switch · q quit"
+		return hintLine(keyHint("n", "new"), keyHint("e", "edit"), keyHint("r", "rebuild"),
+			keyHint("d", "remove"), keyHint("enter", "path"), keyHint("q", "quit"))
 	case tabLog:
-		return "↑/↓ scroll · pgup/pgdn · g/G top/bottom · tab switch · q quit"
+		return hintLine(keyHint("↑/↓", "scroll"), keyHint("pgup/pgdn", ""), keyHint("g/G", "top/bottom"),
+			keyHint("tab", "switch"), keyHint("q", "quit"))
 	}
-	return "q quit"
+	return keyHint("q", "quit")
 }
 
 func (m *Model) viewHelp(width, height int) string {
@@ -606,6 +855,7 @@ func (m *Model) viewHelp(width, height int) string {
 		"",
 		styleAccent.Render("Bundles"),
 		"  n                 create a bundle (name, target, packages, live/frozen)",
+		"  e                 edit the selected bundle in the same wizard",
 		"  r                 rebuild the selected bundle from its exact versions",
 		"  d                 delete the selected bundle and its manifest",
 		"  enter             show the bundle file path",

@@ -22,9 +22,27 @@ var (
 	styleStatus  = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("237"))
 	styleBadge   = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
 	styleDivider = lipgloss.NewStyle().Faint(true)
+
+	styleHintKey     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("11"))
+	styleHintBracket = lipgloss.NewStyle().Faint(true)
 )
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// keyHint renders one footer shortcut. The brackets are faint so the yellow
+// key itself is what draws the eye; labels stay in the terminal's default
+// colour so the footer does not turn into a wall of colour.
+func keyHint(key, label string) string {
+	hint := styleHintBracket.Render("[") + styleHintKey.Render(key) + styleHintBracket.Render("]")
+	if label == "" {
+		return hint
+	}
+	return hint + " " + label
+}
+
+func hintLine(hints ...string) string {
+	return strings.Join(hints, styleDim.Render(" · "))
+}
 
 func (m *Model) styleFor(kind string) lipgloss.Style {
 	switch kind {

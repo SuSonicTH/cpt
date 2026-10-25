@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/SuSonicTH/cpt/internal/app"
+	"github.com/SuSonicTH/cpt/internal/platform"
 	"github.com/SuSonicTH/cpt/internal/progress"
 )
 
@@ -63,11 +64,99 @@ const (
 	overlayDetail
 )
 
+type bundleStep int
+
+const (
+	bundleStepName bundleStep = iota
+	bundleStepTarget
+	bundleStepPackages
+	bundleStepMode
+)
+
+type bundleCandidate struct {
+	Name        string
+	Description string
+	Installed   bool
+	Conflict    bool
+}
+
 type bundleDraft struct {
-	name     string
-	target   string
-	packages []string
-	frozen   bool
+	step      bundleStep
+	name      string
+	nameInput textinput.Model
+	target    string
+
+	targetCursor int
+
+	candidates       []bundleCandidate
+	candidatesTarget string
+	selected         map[string]bool
+	packageCursor    int
+	packageOffset    int
+	query            string
+	searching        bool
+	search           textinput.Model
+
+	modeCursor int
+	frozen     bool
+	err        string
+}
+
+// bundleTargets lists every platform cpt can build for, with the running
+// platform first so the wizard's default is obvious.
+func bundleTargets() []platform.Platform {
+	current := platform.Current()
+	all := []platform.Platform{
+		{OS: "linux", Arch: "amd64"},
+		{OS: "linux", Arch: "arm64"},
+		{OS: "darwin", Arch: "amd64"},
+		{OS: "darwin", Arch: "arm64"},
+		{OS: "windows", Arch: "amd64"},
+		{OS: "windows", Arch: "arm64"},
+	}
+	out := []platform.Platform{current}
+	for _, p := range all {
+		if p != current {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func newBundleDraft(width int) *bundleDraft {
+	name := textinput.New()
+	name.Placeholder = "devbox"
+	name.CharLimit = 128
+	name.Width = maxInt(10, width-10)
+	name.Prompt = "> "
+	name.Focus()
+
+	search := textinput.New()
+	search.Placeholder = "name or description"
+	search.CharLimit = 200
+	search.Width = maxInt(10, width-14)
+	search.Prompt = ""
+
+	current := platform.Current().String()
+	return &bundleDraft{
+		step:         bundleStepName,
+		nameInput:    name,
+		target:       current,
+		targetCursor: 0,
+		selected:     map[string]bool{},
+		search:       search,
+	}
+}
+
+func (d *bundleDraft) selectedPackages() []string {
+	out := make([]string, 0, len(d.selected))
+	for name, ok := range d.selected {
+		if ok {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 type activity struct {

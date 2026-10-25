@@ -76,14 +76,15 @@ type BundleBuildResult struct {
 
 // BundleInfo describes a saved bundle for listings and the TUI.
 type BundleInfo struct {
-	Name     string    `json:"name"`
-	Path     string    `json:"path"`
-	Manifest string    `json:"manifest"`
-	Target   string    `json:"target"`
-	Frozen   bool      `json:"frozen"`
-	Packages int       `json:"packages"`
-	Size     int64     `json:"size"`
-	Created  time.Time `json:"created"`
+	Name         string    `json:"name"`
+	Path         string    `json:"path"`
+	Manifest     string    `json:"manifest"`
+	Target       string    `json:"target"`
+	Frozen       bool      `json:"frozen"`
+	Packages     int       `json:"packages"`
+	PackageNames []string  `json:"package_names,omitempty"`
+	Size         int64     `json:"size"`
+	Created      time.Time `json:"created"`
 }
 
 type builtPackage struct {
@@ -1090,15 +1091,21 @@ func (a *App) Bundles() ([]BundleInfo, error) {
 		if info, err := os.Stat(path); err == nil {
 			size = info.Size()
 		}
+		names := make([]string, 0, len(m.Packages))
+		for _, p := range m.Packages {
+			names = append(names, p.Name)
+		}
+		sort.Strings(names)
 		out = append(out, BundleInfo{
-			Name:     m.Name,
-			Path:     path,
-			Manifest: manifestPath,
-			Target:   m.Target,
-			Frozen:   m.Frozen,
-			Packages: len(m.Packages),
-			Size:     size,
-			Created:  m.Created,
+			Name:         m.Name,
+			Path:         path,
+			Manifest:     manifestPath,
+			Target:       m.Target,
+			Frozen:       m.Frozen,
+			Packages:     len(m.Packages),
+			PackageNames: names,
+			Size:         size,
+			Created:      m.Created,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

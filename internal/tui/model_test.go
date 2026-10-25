@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/SuSonicTH/cpt/internal/app"
 	"github.com/SuSonicTH/cpt/internal/progress"
@@ -56,30 +57,101 @@ func send(m *Model, s string) {
 	m.Update(keyMsg(s))
 }
 
+func plainView(m *Model) string {
+	return ansi.Strip(m.View())
+}
+
 func TestBundleWizardCollectsInput(t *testing.T) {
 	m := testModel(t)
 	m.loadingRows = false
 	m.setTab(tabBundles)
 	send(m, "n")
-	if m.prompt == nil || m.prompt.kind != promptBundleName {
-		t.Fatalf("bundle wizard did not start: %+v", m.prompt)
+	if m.bundleDraft == nil || m.bundleDraft.step != bundleStepName {
+		t.Fatalf("bundle wizard did not start: %+v", m.bundleDraft)
 	}
-	m.prompt.input.SetValue("devbox")
+	if view := plainView(m); strings.Contains(view, "bundle wizard:") {
+		t.Fatalf("name step should not show a premature wizard summary:\n%s", view)
+	}
+	m.bundleDraft.nameInput.SetValue("devbox")
 	send(m, "enter")
-	if m.prompt == nil || m.prompt.kind != promptBundleTarget {
-		t.Fatalf("target prompt missing: %+v", m.prompt)
+	if m.bundleDraft == nil || m.bundleDraft.step != bundleStepTarget {
+		t.Fatalf("target step missing: %+v", m.bundleDraft)
+	}
+	if view := plainView(m); !strings.Contains(view, "Target platform") || !strings.Contains(view, "(current)") {
+		t.Fatalf("platform list is not rendered as a selectable list:\n%s", view)
 	}
 	send(m, "enter")
-	if m.prompt == nil || m.prompt.kind != promptBundlePackages {
-		t.Fatalf("packages prompt missing: %+v", m.prompt)
+	if m.bundleDraft == nil || m.bundleDraft.step != bundleStepPackages {
+		t.Fatalf("package step missing: %+v", m.bundleDraft)
+	}
+	if len(m.bundleDraft.candidates) == 0 {
+		t.Fatal("package list is empty")
+	}
+	send(m, "a")
+	if len(m.bundleDraft.selectedPackages()) == 0 {
+		t.Fatal("select-all did not select packages")
 	}
 	send(m, "enter")
-	if m.prompt == nil || m.prompt.kind != promptBundleFrozen {
-		t.Fatalf("frozen prompt missing: %+v", m.prompt)
+	if m.bundleDraft == nil || m.bundleDraft.step != bundleStepMode {
+		t.Fatalf("mode step missing: %+v", m.bundleDraft)
 	}
 	send(m, "enter")
 	if m.running != true || m.bundleDraft != nil {
 		t.Fatalf("bundle build did not start: running=%v draft=%+v", m.running, m.bundleDraft)
+	}
+}
+
+func TestBundleTargetListChangesTarget(t *testing.T) {
+	m := testModel(t)
+	m.loadingRows = false
+	m.setTab(tabBundles)
+	send(m, "n")
+	m.bundleDraft.nameInput.SetValue("devbox")
+	send(m, "enter")
+	before := m.bundleDraft.target
+	send(m, "down")
+	send(m, "enter")
+	if m.bundleDraft.target == before {
+		t.Fatal("down did not change the selected target")
+	}
+	if len(m.bundleDraft.candidates) == 0 {
+		t.Fatalf("no packages listed for %s", m.bundleDraft.target)
+	}
+}
+
+func TestFooterShortcutsAndTabHint(t *testing.T) {
+	m := testModel(t)
+	loadRows(t, m)
+	view := plainView(m)
+	for _, want := range []string{"[/] search", "[space] select", "[a] all updates", "[tab] switch tabs"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view missing shortcut %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestBundleScreenHasOneShortcutLine(t *testing.T) {
+	m := testModel(t)
+	loadRows(t, m)
+	send(m, "3")
+	view := plainView(m)
+	if strings.Count(view, "[n] new") != 1 {
+		t.Fatalf("bundle shortcuts should appear once (footer only):\n%s", view)
+	}
+	if !strings.Contains(view, "[e] edit") {
+		t.Fatalf("bundle footer is missing the edit shortcut:\n%s", view)
+	}
+}
+
+func TestPromptLabelIsNotTruncated(t *testing.T) {
+	m := testModel(t)
+	m.loadingRows = false
+	m.width = 48
+	m.resize()
+	m.openPrompt(promptBundleTarget, "target platform", "linux/amd64", "linux/amd64", nil, "")
+	line := ansi.Strip(m.statusLine(m.width))
+	if strings.Contains(line, "…") || !strings.Contains(line, "target platform") {
+		t.Fatalf("prompt label was truncated: %q", line)
 	}
 }
 
@@ -374,5 +446,64 @@ func TestModelCancelledRefreshKeepsPreviousRows(t *testing.T) {
 	}
 	if m.status != "refresh cancelled" || m.statusErr {
 		t.Fatalf("unexpected cancellation status %q (err=%v)", m.status, m.statusErr)
+	}
+}
+
+func TestBundleDetailListsIncludedPackages(t *testing.T) {
+	m := testModel(t)
+	m.loadingRows = false
+	m.bundles = []app.BundleInfo{{
+		Name:         "devbox",
+		Target:       "linux/amd64",
+		Frozen:       true,
+		Packages:     2,
+		PackageNames: []string{"fzf", "jq"},
+	}}
+	m.bundleCursor = 0
+	m.setTab(tabBundles)
+	view := plainView(m)
+	for _, want := range []string{"Included packages", "fzf", "jq", "target: linux/amd64"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("bundle detail missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestBundleEditPrefillsWizard(t *testing.T) {
+	m := testModel(t)
+	m.loadingRows = false
+	m.bundles = []app.BundleInfo{{
+		Name:         "devbox",
+		Target:       "linux/amd64",
+		Frozen:       true,
+		Packages:     2,
+		PackageNames: []string{"fzf", "jq"},
+	}}
+	m.bundleCursor = 0
+	m.setTab(tabBundles)
+	send(m, "e")
+	d := m.bundleDraft
+	if d == nil {
+		t.Fatal("e did not open the bundle wizard")
+	}
+	if d.name != "devbox" || d.nameInput.Value() != "devbox" {
+		t.Fatalf("name was not pre-filled: %+v", d)
+	}
+	if d.target != "linux/amd64" || !d.frozen {
+		t.Fatalf("target/mode were not pre-filled: %+v", d)
+	}
+	if !d.selected["fzf"] || !d.selected["jq"] {
+		t.Fatalf("packages were not pre-selected: %+v", d.selected)
+	}
+	send(m, "enter")
+	if d.step != bundleStepTarget {
+		t.Fatalf("name step did not advance: %v", d.step)
+	}
+	send(m, "enter")
+	if d.step != bundleStepPackages {
+		t.Fatalf("target step did not advance: %v", d.step)
+	}
+	if !d.selected["fzf"] || !d.selected["jq"] {
+		t.Fatalf("package selection was lost entering the list: %+v", d.selected)
 	}
 }

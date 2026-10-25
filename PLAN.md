@@ -7,7 +7,7 @@ GitHub releases) using declarative JSON package lists, installs them into a flat
 up a working `cpt` environment on another machine.
 
 Status: design accepted; M0–M5 implemented (core, CLI, shell integration, TUI, bundles,
-Windows/macOS platform support).
+Windows/macOS platform support), plus the completed M5.1 bundle/UI polish milestone.
 
 ---
 
@@ -441,8 +441,16 @@ Bubble Tea + Lip Gloss + Bubbles. Tabs: **Packages · Lists · Bundles · Log**.
   `esc` cancels (context cancel, `.part` cleanup).
 - Lists tab: source, origin URL, age, package count, conflicts; `n` add, `r` refresh,
   `x` remove. Changed shell snippets surface here for approval with a diff.
-- Bundles tab: wizard — name, target, packages prefiltered for that target,
-  live/frozen, build with progress.
+- Bundles tab: two columns like Packages. The left table lists saved bundles; the
+  selected bundle's details and full included-package list appear on the right.
+- `n` and `e` open the same four-step wizard (name → target platform → packages →
+  live/frozen + build). Editing pre-fills the name, target, package selection and
+  mode. Targets are chosen from a selectable platform list and packages from a
+  searchable checkbox list filtered to that target; nothing has to be typed from
+  memory. `r` rebuilds exact versions and `d` removes.
+- Exactly one shortcut line is rendered, at the bottom. Keys are bracketed and
+  yellow (`[space] select`, `[e] edit`, …), the tab strip carries a
+  `[tab] switch tabs` hint, and prompt labels are never ellipsised.
 - Non-TTY or `--no-tui` prints a clear message and routes to the CLI.
 
 ---
@@ -528,6 +536,7 @@ other.
 | **v0.2 M3** | TUI packages/lists/log, progress, search, multi-select | install and update purely from the TUI; non-TTY fallback works |
 | **v0.3 M4** | bundle footer, build, run, frozen/live, cross-target base fetch, bundles tab | build arm64 bundle on amd64, run it in a temp HOME, re-run is idempotent |
 | **v0.4 M5** | Windows (zip, `.exe`, PowerShell init, file locking), darwin signing verdict, GC/doctor polish | CI green on windows/amd64 and darwin/arm64 |
+| **v0.4.1 M5.1 (done)** | TUI bundle/UI polish: two-column Bundles tab with included-package detail; `n`/`e` share a four-step wizard; selectable target platform and searchable package checklist; edit pre-fills every current value; one bracketed/yellow footer shortcut line; `[tab] switch tabs` header hint; untruncated prompt labels | create and edit bundles without typing platforms or package lists; selected bundle shows its included packages; no duplicate bundle shortcuts; `go test ./...` passes |
 | **v0.5 M6** | goreleaser, install.sh, self-update, docs, nightly list lint | tagged release installable via one-liner |
 
 ---

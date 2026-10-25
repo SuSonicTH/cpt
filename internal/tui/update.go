@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/SuSonicTH/cpt/internal/app"
+	"github.com/SuSonicTH/cpt/internal/bundle"
 	"github.com/SuSonicTH/cpt/internal/platform"
 	"github.com/SuSonicTH/cpt/internal/progress"
 )
@@ -164,7 +165,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) listTableHeight() int { return maxInt(3, m.bodyHeight()-8) }
 
-func (m *Model) bundleTableHeight() int { return maxInt(3, m.bodyHeight()-8) }
+func (m *Model) bundleTableHeight() int { return maxInt(3, m.bodyHeight()-1) }
 
 func (m *Model) shellListHeight() int { return maxInt(2, m.bodyHeight()-2) }
 
@@ -241,6 +242,10 @@ func (m *Model) resize() {
 	m.search.Width = maxInt(10, m.width-6)
 	if m.prompt != nil {
 		m.prompt.input.Width = maxInt(10, m.width-20)
+	}
+	if m.bundleDraft != nil {
+		m.bundleDraft.nameInput.Width = maxInt(10, m.width-10)
+		m.bundleDraft.search.Width = maxInt(10, m.width-14)
 	}
 	m.ensureCursorVisible(body)
 	m.ensureListVisible(m.listTableHeight())
@@ -366,6 +371,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+c" {
 		m.shutdown()
 		return m, tea.Quit
+	}
+	if m.bundleDraft != nil {
+		return m.handleBundleWizardKey(msg)
 	}
 	if m.prompt != nil {
 		return m.handlePromptKey(msg)
@@ -724,8 +732,9 @@ func (m *Model) handleBundlesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.app.Offline {
 			return m, m.setStatus("cannot build a bundle in offline mode", true)
 		}
-		m.bundleDraft = &bundleDraft{target: platform.Current().String()}
-		return m, m.openPrompt(promptBundleName, "new bundle: name", "devbox", "", nil, "")
+		m.bundleDraft = newBundleDraft(m.width)
+		m.clearStatus()
+		return m, nil
 	case "r":
 		b := m.currentBundle()
 		if b == nil {
@@ -743,6 +752,20 @@ func (m *Model) handleBundlesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.running = true
 		m.opName = "rebuild " + b.Name
 		return m, bundleRebuildCmd(ctx, m.app, b.Name)
+	case "e":
+		b := m.currentBundle()
+		if b == nil {
+			return m, m.setStatus("no bundle selected", true)
+		}
+		if m.busy() {
+			return m, m.setStatus("an operation is already running", true)
+		}
+		if m.app.Offline {
+			return m, m.setStatus("cannot edit a bundle in offline mode", true)
+		}
+		m.bundleDraft = m.newBundleEditDraft(b)
+		m.clearStatus()
+		return m, nil
 	case "d", "x":
 		b := m.currentBundle()
 		if b == nil {
@@ -755,6 +778,369 @@ func (m *Model) handleBundlesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m *Model) handleBundleWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	d := m.bundleDraft
+	if d == nil {
+		return m, nil
+	}
+	key := msg.String()
+	if key == "esc" {
+		if d.step == bundleStepPackages && (d.searching || d.query != "") {
+			d.searching = false
+			d.search.Blur()
+			d.query = ""
+			d.search.SetValue("")
+			d.packageCursor = 0
+			d.packageOffset = 0
+			return m, nil
+		}
+		m.bundleDraft = nil
+		m.clearStatus()
+		return m, nil
+	}
+
+	if d.step == bundleStepPackages && d.searching {
+		switch key {
+		case "enter":
+			d.searching = false
+			d.search.Blur()
+			return m, nil
+		default:
+			var cmd tea.Cmd
+			d.search, cmd = d.search.Update(msg)
+			d.query = d.search.Value()
+			d.packageCursor = 0
+			d.packageOffset = 0
+			m.ensureBundlePackageVisible(d, m.bundlePackageListHeight())
+			return m, cmd
+		}
+	}
+
+	switch d.step {
+	case bundleStepName:
+		if key == "enter" {
+			name := strings.TrimSpace(d.nameInput.Value())
+			switch {
+			case name == "":
+				d.err = "a bundle name is required"
+				return m, nil
+			case !bundle.ValidName(name):
+				d.err = "use a short name with letters, numbers, '.', '_' or '-'"
+				return m, nil
+			}
+			d.name = name
+			d.err = ""
+			d.step = bundleStepTarget
+			d.nameInput.Blur()
+			return m, nil
+		}
+		d.err = ""
+		var cmd tea.Cmd
+		d.nameInput, cmd = d.nameInput.Update(msg)
+		return m, cmd
+
+	case bundleStepTarget:
+		targets := bundleTargets()
+		switch key {
+		case "up", "k":
+			if d.targetCursor > 0 {
+				d.targetCursor--
+			}
+		case "down", "j":
+			if d.targetCursor < len(targets)-1 {
+				d.targetCursor++
+			}
+		case "home", "g":
+			d.targetCursor = 0
+		case "end", "G":
+			d.targetCursor = len(targets) - 1
+		case "shift+tab", "left", "h":
+			d.step = bundleStepName
+			d.nameInput.Focus()
+			return m, nil
+		case "enter":
+			d.target = targets[d.targetCursor].String()
+			m.prepareBundlePackages(d)
+			d.step = bundleStepPackages
+			d.err = ""
+			return m, nil
+		}
+		if d.targetCursor >= 0 && d.targetCursor < len(targets) {
+			d.target = targets[d.targetCursor].String()
+		}
+		return m, nil
+
+	case bundleStepPackages:
+		switch key {
+		case "/":
+			d.searching = true
+			d.search.Width = maxInt(10, m.width-14)
+			d.search.Focus()
+			return m, nil
+		case "up", "k":
+			m.moveBundlePackage(d, -1)
+		case "down", "j":
+			m.moveBundlePackage(d, 1)
+		case "pgup", "ctrl+b":
+			m.moveBundlePackage(d, -m.bundlePackageListHeight())
+		case "pgdown", "ctrl+f":
+			m.moveBundlePackage(d, m.bundlePackageListHeight())
+		case "home", "g":
+			d.packageCursor = 0
+			m.ensureBundlePackageVisible(d, m.bundlePackageListHeight())
+		case "end", "G":
+			if visible := m.bundleVisibleCandidates(d); len(visible) > 0 {
+				d.packageCursor = len(visible) - 1
+			}
+			m.ensureBundlePackageVisible(d, m.bundlePackageListHeight())
+		case " ":
+			visible := m.bundleVisibleCandidates(d)
+			if len(visible) > 0 {
+				if d.packageCursor >= len(visible) {
+					d.packageCursor = len(visible) - 1
+				}
+				name := d.candidates[visible[d.packageCursor]].Name
+				d.selected[name] = !d.selected[name]
+				m.moveBundlePackage(d, 1)
+			}
+		case "a":
+			visible := m.bundleVisibleCandidates(d)
+			all := len(visible) > 0
+			for _, idx := range visible {
+				if !d.selected[d.candidates[idx].Name] {
+					all = false
+					break
+				}
+			}
+			for _, idx := range visible {
+				name := d.candidates[idx].Name
+				if all {
+					delete(d.selected, name)
+				} else {
+					d.selected[name] = true
+				}
+			}
+		case "shift+tab", "left", "h":
+			d.step = bundleStepTarget
+			d.err = ""
+			return m, nil
+		case "enter":
+			if len(d.selectedPackages()) == 0 {
+				d.err = "select at least one package for the bundle"
+				return m, nil
+			}
+			d.step = bundleStepMode
+			d.err = ""
+			if d.frozen {
+				d.modeCursor = 1
+			} else {
+				d.modeCursor = 0
+			}
+			return m, nil
+		}
+		return m, nil
+
+	case bundleStepMode:
+		switch key {
+		case "up", "k", "left", "h":
+			d.modeCursor = 0
+		case "down", "j", "right", "l":
+			d.modeCursor = 1
+		case " ":
+			if d.modeCursor == 0 {
+				d.modeCursor = 1
+			} else {
+				d.modeCursor = 0
+			}
+		case "shift+tab":
+			d.step = bundleStepPackages
+			d.err = ""
+			return m, nil
+		case "enter":
+			d.frozen = d.modeCursor == 1
+			if m.app.Offline {
+				d.err = "cannot build a bundle in offline mode"
+				return m, nil
+			}
+			m.clearStatus()
+			return m, m.startBundleBuild()
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m *Model) bundlePackageListHeight() int {
+	return maxInt(1, m.bodyHeight()-9)
+}
+
+func (m *Model) bundleVisibleCandidates(d *bundleDraft) []int {
+	query := strings.ToLower(strings.TrimSpace(d.query))
+	out := make([]int, 0, len(d.candidates))
+	for i := range d.candidates {
+		c := &d.candidates[i]
+		if query == "" || fuzzyContains(c.Name, query) || fuzzyContains(c.Description, query) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+func (m *Model) ensureBundlePackageVisible(d *bundleDraft, height int) {
+	if height < 1 {
+		height = 1
+	}
+	visible := m.bundleVisibleCandidates(d)
+	if len(visible) == 0 {
+		d.packageCursor = 0
+		d.packageOffset = 0
+		return
+	}
+	if d.packageCursor < 0 {
+		d.packageCursor = 0
+	}
+	if d.packageCursor >= len(visible) {
+		d.packageCursor = len(visible) - 1
+	}
+	if d.packageCursor < d.packageOffset {
+		d.packageOffset = d.packageCursor
+	}
+	if d.packageCursor >= d.packageOffset+height {
+		d.packageOffset = d.packageCursor - height + 1
+	}
+	maxOffset := len(visible) - height
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if d.packageOffset > maxOffset {
+		d.packageOffset = maxOffset
+	}
+	if d.packageOffset < 0 {
+		d.packageOffset = 0
+	}
+}
+
+func (m *Model) moveBundlePackage(d *bundleDraft, delta int) {
+	visible := m.bundleVisibleCandidates(d)
+	if len(visible) == 0 {
+		d.packageCursor = 0
+		d.packageOffset = 0
+		return
+	}
+	d.packageCursor += delta
+	if d.packageCursor < 0 {
+		d.packageCursor = 0
+	}
+	if d.packageCursor >= len(visible) {
+		d.packageCursor = len(visible) - 1
+	}
+	m.ensureBundlePackageVisible(d, m.bundlePackageListHeight())
+}
+
+func (m *Model) prepareBundlePackages(d *bundleDraft) {
+	if d.candidatesTarget == d.target && len(d.candidates) > 0 {
+		return
+	}
+	target, err := platform.Parse(d.target)
+	if err != nil {
+		return
+	}
+	d.candidatesTarget = d.target
+	d.candidates = m.bundleCandidates(target)
+	d.selected = map[string]bool{}
+	for _, name := range m.installedForTarget(target) {
+		d.selected[name] = true
+	}
+	d.packageCursor = 0
+	d.packageOffset = 0
+	d.query = ""
+	d.searching = false
+	d.search.Blur()
+	d.search.SetValue("")
+}
+
+// bundleCandidates lists every package that can be built for target. Installed
+// packages start selected so the common case (bundle what is already here) is
+// one keystroke away.
+func (m *Model) bundleCandidates(target platform.Platform) []bundleCandidate {
+	rowByName := make(map[string]app.Row, len(m.rows))
+	for _, row := range m.rows {
+		rowByName[row.Name] = row
+	}
+	out := []bundleCandidate{}
+	cat, err := m.app.Catalog()
+	if err != nil {
+		for _, row := range m.rows {
+			out = append(out, bundleCandidate{
+				Name:        row.Name,
+				Description: row.Description,
+				Installed:   row.Version != "",
+				Conflict:    row.Conflict,
+			})
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+		return out
+	}
+	conflicts := cat.Conflicts()
+	seen := map[string]bool{}
+	for _, entry := range cat.Entries() {
+		name := entry.Pkg.Name
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		if entry.Pkg.Source.Type != "url" && entry.Pkg.Source.Asset[target.String()] == "" {
+			continue
+		}
+		row, ok := rowByName[name]
+		description := entry.Pkg.Description
+		if description == "" && ok {
+			description = row.Description
+		}
+		out = append(out, bundleCandidate{
+			Name:        name,
+			Description: description,
+			Installed:   ok && row.Version != "",
+			Conflict:    len(conflicts[name]) > 1,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// newBundleEditDraft opens the same wizard as a new bundle, but with the
+// existing bundle's name, target, package set and mode already filled in.
+func (m *Model) newBundleEditDraft(b *app.BundleInfo) *bundleDraft {
+	d := newBundleDraft(m.width)
+	d.name = b.Name
+	d.nameInput.SetValue(b.Name)
+	d.target = b.Target
+	for i, p := range bundleTargets() {
+		if p.String() == d.target {
+			d.targetCursor = i
+			break
+		}
+	}
+	d.frozen = b.Frozen
+	if b.Frozen {
+		d.modeCursor = 1
+	}
+	m.prepareBundlePackages(d)
+	if len(b.PackageNames) > 0 {
+		available := make(map[string]bool, len(d.candidates))
+		for _, c := range d.candidates {
+			available[c.Name] = true
+		}
+		d.selected = map[string]bool{}
+		for _, name := range b.PackageNames {
+			if available[name] {
+				d.selected[name] = true
+			}
+		}
+	}
+	return d
 }
 
 // installedForTarget lists installed packages that declare support for target,
@@ -788,13 +1174,11 @@ func (m *Model) startBundleBuild() tea.Cmd {
 	if draft == nil {
 		return m.setStatus("bundle wizard was cancelled", true)
 	}
-	m.bundleDraft = nil
-	packages := draft.packages
+	packages := draft.selectedPackages()
 	if len(packages) == 0 {
-		if target, err := platform.Parse(draft.target); err == nil {
-			packages = m.installedForTarget(target)
-		}
+		return m.setStatus("select at least one package for the bundle", true)
 	}
+	m.bundleDraft = nil
 	opt := app.BundleOptions{
 		Name:     draft.name,
 		Target:   draft.target,
@@ -970,42 +1354,6 @@ func (m *Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.beginOperation("remove", p.names)
 		case promptForceRemove:
 			return m, m.beginOperationForce("remove", p.names, true)
-		case promptBundleName:
-			if value == "" {
-				return m, m.setStatus("a bundle name is required", true)
-			}
-			if m.bundleDraft == nil {
-				m.bundleDraft = &bundleDraft{target: platform.Current().String()}
-			}
-			m.bundleDraft.name = value
-			return m, m.openPrompt(promptBundleTarget, "target platform", "linux/amd64", m.bundleDraft.target, nil, "")
-		case promptBundleTarget:
-			target, err := platform.Parse(value)
-			if err != nil {
-				cmd := m.setStatus(err.Error(), true)
-				return m, tea.Batch(cmd, m.openPrompt(promptBundleTarget, "target platform", "linux/amd64", value, nil, ""))
-			}
-			m.bundleDraft.target = target.String()
-			defaults := strings.Join(m.installedForTarget(target), ",")
-			return m, m.openPrompt(promptBundlePackages, "packages (comma separated)", "blank = installed packages", defaults, nil, "")
-		case promptBundlePackages:
-			m.bundleDraft.packages = splitPackageList(value)
-			return m, m.openPrompt(promptBundleFrozen, "frozen bundle?", "y/N", "n", nil, "")
-		case promptBundleFrozen:
-			switch strings.ToLower(value) {
-			case "y", "yes", "true":
-				m.bundleDraft.frozen = true
-			case "", "n", "no", "false":
-				m.bundleDraft.frozen = false
-			default:
-				cmd := m.setStatus("answer y or n", true)
-				return m, tea.Batch(cmd, m.openPrompt(promptBundleFrozen, "frozen bundle?", "y/N", value, nil, ""))
-			}
-			if m.app.Offline {
-				return m, m.setStatus("cannot build a bundle in offline mode", true)
-			}
-			m.clearStatus()
-			return m, m.startBundleBuild()
 		case promptRemoveBundle:
 			m.clearStatus()
 			m.loadingRows = true

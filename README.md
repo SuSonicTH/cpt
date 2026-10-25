@@ -86,7 +86,12 @@ background with per-package spinners and an aggregate progress bar. Use
 `space` to multi-select packages, `/` to search, `i` to install, `u` to update,
 `d` to remove, `X` to force-remove modified files, `p` to pin, `enter` for a
 full-screen detail view, and `?` for the complete key map. `esc` cancels a
-running operation or a background version check.
+running operation or a background version check. Footer shortcuts are always
+shown as bracketed keys (for example `[space] select`) with the key in yellow.
+The Bundles tab shows the selected bundle's included packages on the right and
+opens a four-step wizard for both new and existing bundles (`n` / `e`), where the
+target platform and packages are chosen from selectable lists rather than typed
+in.
 
 The TUI never writes outside the terminal: progress events come from the same
 engine the CLI uses, and the log tab tails `~/.cpt/logs/cpt.log`. If cpt is run
