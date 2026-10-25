@@ -76,15 +76,20 @@ type BundleBuildResult struct {
 
 // BundleInfo describes a saved bundle for listings and the TUI.
 type BundleInfo struct {
-	Name         string    `json:"name"`
-	Path         string    `json:"path"`
-	Manifest     string    `json:"manifest"`
-	Target       string    `json:"target"`
-	Frozen       bool      `json:"frozen"`
-	Packages     int       `json:"packages"`
-	PackageNames []string  `json:"package_names,omitempty"`
-	Size         int64     `json:"size"`
-	Created      time.Time `json:"created"`
+	Name         string   `json:"name"`
+	Path         string   `json:"path"`
+	Manifest     string   `json:"manifest"`
+	Target       string   `json:"target"`
+	Frozen       bool     `json:"frozen"`
+	Packages     int      `json:"packages"`
+	PackageNames []string `json:"package_names,omitempty"`
+	Size         int64    `json:"size"`
+	// Executable reports whether the built executable exists and is a valid
+	// cpt bundle; SSHEligible additionally requires a POSIX target, which is
+	// what SSH targets can install.
+	Executable  bool      `json:"executable"`
+	SSHEligible bool      `json:"ssh_eligible"`
+	Created     time.Time `json:"created"`
 }
 
 type builtPackage struct {
@@ -1091,6 +1096,11 @@ func (a *App) Bundles() ([]BundleInfo, error) {
 		if info, err := os.Stat(path); err == nil {
 			size = info.Size()
 		}
+		executable := bundle.IsBundle(path)
+		sshEligible := false
+		if p, err := platform.Parse(m.Target); err == nil && p.OS != "windows" {
+			sshEligible = executable
+		}
 		names := make([]string, 0, len(m.Packages))
 		for _, p := range m.Packages {
 			names = append(names, p.Name)
@@ -1105,6 +1115,8 @@ func (a *App) Bundles() ([]BundleInfo, error) {
 			Packages:     len(m.Packages),
 			PackageNames: names,
 			Size:         size,
+			Executable:   executable,
+			SSHEligible:  sshEligible,
 			Created:      m.Created,
 		})
 	}

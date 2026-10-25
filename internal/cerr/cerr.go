@@ -52,17 +52,35 @@ func KindOf(err error) Kind {
 	return Generic
 }
 
-// ExitCode returns the process exit code for err. Errors may carry an explicit
-// exit status (interactive SSH sessions do) before the cerr kind is considered.
+// ExitStatus is implemented by errors that must report a specific process exit
+// status instead of their cerr kind. Interactive SSH sessions use it to return
+// the remote shell's status unchanged.
+//
+// Only types that declare this method are honoured. A plain *exec.ExitError is
+// deliberately not: it has an ExitCode method of its own, and honouring that
+// would let a wrapped subprocess failure override the documented cerr code of
+// the error that wraps it.
+type ExitStatus interface {
+	error
+	CerrExitStatus() int
+}
+
+// ExitCode returns the process exit code for err. A cerr kind always wins,
+// because it is the documented contract of the command that returned it; only
+// errors with an explicit ExitStatus may override a plain Generic error.
 func ExitCode(err error) int {
 	if err == nil {
 		return 0
 	}
-	var ec interface{ ExitCode() int }
-	if errors.As(err, &ec) {
-		if code := ec.ExitCode(); code > 0 && code < 256 {
+	var e *E
+	if errors.As(err, &e) {
+		return int(e.Kind)
+	}
+	var st ExitStatus
+	if errors.As(err, &st) {
+		if code := st.CerrExitStatus(); code > 0 && code < 256 {
 			return code
 		}
 	}
-	return int(KindOf(err))
+	return int(Generic)
 }

@@ -145,3 +145,46 @@ func TestZeroTimestampsAreOmitted(t *testing.T) {
 		t.Fatalf("zero timestamps were serialized: %s", data)
 	}
 }
+
+func TestValidateRejectsReservedTargetNames(t *testing.T) {
+	for _, name := range []string{"list", "add", "edit", "remove", "connect", "help"} {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			tgt := &Target{
+				Name:   name,
+				Bundle: "devbox",
+				SSH:    SSH{Source: SourceCustom, Host: "box"},
+			}
+			if err := NewFile().Put(tgt); err == nil || !strings.Contains(err.Error(), "reserved") {
+				t.Fatalf("reserved name %q accepted: %v", name, err)
+			}
+		})
+	}
+	// A name that only differs in case is still reachable through the short form.
+	if err := NewFile().Put(&Target{Name: "List", Bundle: "devbox", SSH: SSH{Source: SourceCustom, Host: "box"}}); err != nil {
+		t.Fatalf("case-different name rejected: %v", err)
+	}
+	// Loading an older file that already contains a reserved name must work, so
+	// the rest of the target list stays usable.
+	f := NewFile()
+	f.Targets["list"] = &Target{Name: "list", Bundle: "devbox", SSH: SSH{Source: SourceCustom, Host: "box"}}
+	if err := f.Save(filepath.Join(t.TempDir(), "ssh.json")); err != nil {
+		t.Fatalf("existing reserved name broke Save: %v", err)
+	}
+}
+
+func TestExpandHomeHandlesBareTilde(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
+	if got := expandHome("~"); got != home {
+		t.Fatalf("expandHome(~) = %q, want %q", got, home)
+	}
+	if got := expandHome("~/key"); got != filepath.Join(home, "key") {
+		t.Fatalf("expandHome(~/key) = %q", got)
+	}
+	if got := expandHome("/abs/key"); got != "/abs/key" {
+		t.Fatalf("expandHome(/abs/key) = %q", got)
+	}
+}

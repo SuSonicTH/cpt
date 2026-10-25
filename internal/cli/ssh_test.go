@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/SuSonicTH/cpt/internal/bundle"
+	"github.com/SuSonicTH/cpt/internal/cerr"
 )
 
 func sshCLIFixture(t *testing.T) string {
@@ -124,5 +126,75 @@ func TestSSHCLIRejectsInvalidBundleExecutable(t *testing.T) {
 	code, _, errb := runCLI(t, "--root", root, "ssh", "add", "bad", "--bundle", "devbox", "--host", "box")
 	if code != 2 || !strings.Contains(errb, "valid executable") {
 		t.Fatalf("invalid bundle exit=%d stderr=%s", code, errb)
+	}
+}
+
+// writeFakeSSHBinaries puts fake scp/ssh executables first on PATH.
+func writeFakeSSHBinaries(t *testing.T, sshBody, scpBody string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake ssh/scp shell scripts are POSIX-only")
+	}
+	dir := t.TempDir()
+	for name, body := range map[string]string{"ssh": sshBody, "scp": scpBody} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestSSHCLIUnknownSubcommandIsUsageError(t *testing.T) {
+	root := sshCLIFixture(t)
+	code, _, errb := runCLI(t, "--root", root, "ssh", "lst")
+	if code != int(cerr.Usage) {
+		t.Fatalf("unknown subcommand exit = %d, want %d (stderr=%s)", code, int(cerr.Usage), errb)
+	}
+	if !strings.Contains(errb, "unknown ssh subcommand") {
+		t.Fatalf("unknown subcommand message = %q", errb)
+	}
+}
+
+func TestSSHCLIRejectsReservedTargetName(t *testing.T) {
+	root := sshCLIFixture(t)
+	code, _, errb := runCLI(t, "--root", root, "ssh", "add", "list",
+		"--bundle", "devbox", "--config-host", "staging-box")
+	if code != int(cerr.Usage) || !strings.Contains(errb, "reserved") {
+		t.Fatalf("reserved name accepted: exit=%d stderr=%s", code, errb)
+	}
+}
+
+// TestSSHCLIConnectCopyFailureExitsNetwork pins the documented exit code: a
+// failed scp must exit 5 even though the wrapped *exec.ExitError reports 1.
+func TestSSHCLIConnectCopyFailureExitsNetwork(t *testing.T) {
+	root := sshCLIFixture(t)
+	if code, _, errb := runCLI(t, "--root", root, "ssh", "add", "staging",
+		"--bundle", "devbox", "--config-host", "staging-box"); code != 0 {
+		t.Fatalf("add failed: %d %s", code, errb)
+	}
+	writeFakeSSHBinaries(t, "#!/bin/sh\nexit 0\n", "#!/bin/sh\nexit 1\n")
+	code, _, errb := runCLI(t, "--root", root, "ssh", "connect", "staging")
+	if code != int(cerr.Network) {
+		t.Fatalf("failed copy exit = %d, want %d (stderr=%s)", code, int(cerr.Network), errb)
+	}
+}
+
+// TestSSHCLIConnectPropagatesSessionStatus checks that the remote shell status
+// reaches the caller unchanged.
+func TestSSHCLIConnectPropagatesSessionStatus(t *testing.T) {
+	root := sshCLIFixture(t)
+	if code, _, errb := runCLI(t, "--root", root, "ssh", "add", "staging",
+		"--bundle", "devbox", "--config-host", "staging-box"); code != 0 {
+		t.Fatalf("add failed: %d %s", code, errb)
+	}
+	writeFakeSSHBinaries(t, `#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "-tt" ]; then exit 7; fi
+done
+exit 0
+`, "#!/bin/sh\nexit 0\n")
+	code, _, errb := runCLI(t, "--root", root, "ssh", "connect", "staging")
+	if code != 7 {
+		t.Fatalf("session exit = %d, want 7 (stderr=%s)", code, errb)
 	}
 }

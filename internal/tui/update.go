@@ -45,7 +45,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lists = sanitizeLists(msg.lists)
 		m.bundles = sanitizeBundles(msg.bundles)
 		m.sshTargets = sanitizeSSHTargets(msg.sshTargets)
-		m.sshHosts = msg.sshHosts
+		m.sshHosts = sanitizeSSHHosts(msg.sshHosts)
 		m.sshHostsErr = ""
 		if msg.sshHostErr != nil {
 			m.sshHostsErr = sanitize(msg.sshHostErr.Error(), false)
@@ -169,9 +169,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if isErr {
 			text = msg.err.Error()
+			if msg.status != "" {
+				text = msg.status + ": " + msg.err.Error()
+			}
 			m.appendLog("✗ " + msg.err.Error())
 		}
 		return m, tea.Batch(m.setStatus(text, isErr), m.startReload(false))
+	case sshSaveFailedMsg:
+		// Keep the wizard alive with the user's input; only the error is new.
+		m.loadingRows = false
+		if msg.err == nil {
+			return m, nil
+		}
+		m.appendLog("✗ " + msg.err.Error())
+		if msg.draft != nil {
+			msg.draft.err = sanitize(msg.err.Error(), false)
+			m.sshDraft = msg.draft
+			return m, m.setStatus("SSH target not saved", true)
+		}
+		return m, m.setStatus(msg.err.Error(), true)
 	}
 	return m, nil
 }

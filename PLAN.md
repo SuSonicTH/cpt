@@ -636,8 +636,9 @@ management.
 
 ### Safety and tests
 
-- The remote rc is never edited; a test asserts the generated remote command
-  never contains `--install-init` and never writes `.bashrc`/`.zshrc`.
+- The remote rc is never edited; a test asserts the generated remote scripts
+  never contain `--install-init`, never use an appending redirect, and are
+  syntax-checked with `sh -n`. Session files are per-pid and removed on exit.
 - Cleanup is opt-in, disabled by default, rejected for dangerous paths, and only
   starts after the interactive shell has exited.
 - The copy cache respects bundle SHA256 and the 24-hour window; a fresh cache
@@ -646,8 +647,11 @@ management.
   interaction.
 - Fake `ssh`/`scp` executables in tests capture argv and exercise config vs
   custom targets, identity/port/proxy flags, missing bundles, offline mode,
-  cleanup on/off, platform mismatch and shell selection. The remote bootstrap is
-  golden-tested and syntax-checked with `sh -n`.
+  cleanup on/off, platform mismatch and shell selection. Both remote scripts are
+  rendered, checked against forbidden directives, and syntax-checked with
+  `sh -n`; every shell branch (bash, zsh, sh) is executed against a fake bundle,
+  and a session status of 240/241/242 is asserted to propagate as a status
+  rather than a prepare sentinel.
 - TUI model tests cover tab navigation, detail rendering, wizard create/edit,
   prefill, delete confirmation and the connect command construction.
 
@@ -757,9 +761,10 @@ other.
 - **TUI:** model unit tests plus one scripted teatest session for search, select and
   install.
 - **SSH targets:** target validation and config parsing (including `Include`),
-  argv construction for config/custom targets, remote bootstrap golden tests,
-  fake `ssh`/`scp` end-to-end connect, no-`--install-init` assertion, cleanup
-  path guards and wizard create/edit tests.
+  argv construction for config/custom targets, executed bash/zsh/sh prepare and
+  shell phases, fake `ssh`/`scp` end-to-end connect, session-status propagation,
+  no-`--install-init` assertion, cleanup path guards and wizard create/edit
+  tests.
 - **CI:** Linux/macOS/Windows test matrix, `goreleaser` on tags with checksums,
   nightly list lint.
 

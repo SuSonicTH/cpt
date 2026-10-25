@@ -62,6 +62,14 @@ type sshDraft struct {
 	optionsCursor int
 	editingRoot   bool
 
+	// warnedName records the name that triggered the overwrite confirmation, so
+	// pressing enter a second time is what overwrites an existing target.
+	warnedName string
+	// originalBundle keeps an existing target's bundle selectable in edit mode
+	// even when it can no longer run over SSH, so saving shows a clear error
+	// instead of silently switching to another bundle.
+	originalBundle string
+
 	err string
 }
 
@@ -100,6 +108,7 @@ func newSSHEditDraft(t *app.SSHTargetInfo, width int, bundles []app.BundleInfo, 
 	d := newSSHDraft(width, bundles, hosts)
 	d.edit = true
 	d.originalName = t.Name
+	d.originalBundle = t.Bundle
 	d.name = t.Name
 	d.nameInput.SetValue(t.Name)
 	d.nameInput.Blur()
@@ -143,12 +152,11 @@ func newSSHEditDraft(t *app.SSHTargetInfo, width int, bundles []app.BundleInfo, 
 		d.sourceCursor = len(d.hosts)
 	}
 	foundBundle := false
-	for i := range d.bundles {
-		if d.bundles[i].Name == t.Bundle {
-			d.bundleCursor = i
-			foundBundle = true
-			break
-		}
+	// The cursor indexes the filtered view, not d.bundles, so an ineligible
+	// bundle before the target's bundle cannot shift the selection.
+	if pos := d.visibleIndex(t.Bundle); pos >= 0 {
+		d.bundleCursor = pos
+		foundBundle = true
 	}
 	if !foundBundle {
 		// Keep the current reference visible even when its executable is
@@ -233,11 +241,46 @@ func (d *sshDraft) visibleBundles() []int {
 	out := make([]int, 0, len(d.bundles))
 	for i := range d.bundles {
 		b := &d.bundles[i]
+		// Hide bundles that can never be saved, except an existing target's own
+		// bundle, which stays visible so editing cannot switch it silently.
+		if !b.SSHEligible && b.Name != d.originalBundle {
+			continue
+		}
 		if query == "" || fuzzyContains(b.Name, query) || fuzzyContains(b.Target, query) {
 			out = append(out, i)
 		}
 	}
 	return out
+}
+
+// visibleIndex returns the position of name inside the filtered bundle list.
+func (d *sshDraft) visibleIndex(name string) int {
+	for i, idx := range d.visibleBundles() {
+		if d.bundles[idx].Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// bundleSSHProblem explains why a bundle cannot be used by an SSH target.
+func bundleSSHProblem(b app.BundleInfo) string {
+	switch {
+	case !b.Executable:
+		return "its executable is missing or invalid; rebuild it"
+	case !b.SSHEligible:
+		return "it targets " + b.Target + "; SSH targets need a POSIX bundle"
+	}
+	return ""
+}
+
+func (m *Model) hasSSHTarget(name string) bool {
+	for i := range m.sshTargets {
+		if m.sshTargets[i].Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *sshDraft) selectedBundle() string {
@@ -500,6 +543,13 @@ func (m *Model) handleSSHWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			case d.edit && name != d.originalName:
 				d.err = "target names cannot be changed; remove and re-add the target"
 				return m, nil
+			case sshtarget.IsReservedName(name):
+				d.err = fmt.Sprintf("%q is reserved by a cpt ssh subcommand; choose another name", name)
+				return m, nil
+			case !d.edit && name != d.warnedName && m.hasSSHTarget(name):
+				d.warnedName = name
+				d.err = fmt.Sprintf("SSH target %q already exists; press enter again to overwrite it", name)
+				return m, nil
 			}
 			d.name = name
 			d.err = ""
@@ -508,6 +558,8 @@ func (m *Model) handleSSHWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		d.err = ""
+		// A warning only applies to the exact name it was shown for.
+		d.warnedName = ""
 		var cmd tea.Cmd
 		d.nameInput, cmd = d.nameInput.Update(msg)
 		return m, cmd
@@ -537,6 +589,7 @@ func (m *Model) handleSSHWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "shift+tab", "left", "h":
 			d.step = sshStepName
 			d.nameInput.Focus()
+			d.err = ""
 			return m, nil
 		case "enter":
 			if len(options) == 0 {
@@ -576,15 +629,16 @@ func (m *Model) handleSSHWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				d.blurDestination()
 				d.step = sshStepSource
+				d.err = ""
 			}
 			return m, nil
-		case "up", "k":
+		case "up":
 			if d.destField > 0 {
 				d.destField--
 				d.focusDestination()
 			}
 			return m, nil
-		case "down", "j":
+		case "down":
 			if d.destField < len(inputs)-1 {
 				d.destField++
 				d.focusDestination()
@@ -640,6 +694,7 @@ func (m *Model) handleSSHWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "shift+tab", "left", "h":
 			d.step = sshStepDestination
 			d.focusDestination()
+			d.err = ""
 			return m, nil
 		case "enter":
 			if len(visible) == 0 {
@@ -648,6 +703,10 @@ func (m *Model) handleSSHWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			if d.bundleCursor >= len(visible) {
 				d.bundleCursor = len(visible) - 1
+			}
+			if b := d.bundles[visible[d.bundleCursor]]; !b.SSHEligible {
+				d.err = fmt.Sprintf("bundle %s cannot run over SSH: %s", b.Name, bundleSSHProblem(b))
+				return m, nil
 			}
 			d.step = sshStepOptions
 			d.optionsCursor = 0
@@ -673,6 +732,7 @@ func (m *Model) handleSSHWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "shift+tab":
 			d.step = sshStepBundle
+			d.err = ""
 			return m, nil
 		case "right", "l":
 			if d.optionsCursor == 0 {
@@ -718,7 +778,7 @@ func (m *Model) handleSSHWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.sshDraft = nil
 				m.clearStatus()
 				m.loadingRows = true
-				return m, sshTargetSaveCmd(m.ctx, m.app, t)
+				return m, sshTargetSaveCmd(m.ctx, m.app, t, d)
 			}
 		}
 		return m, nil
@@ -896,13 +956,14 @@ func (m *Model) viewSSHWizard(width, height int) string {
 		if len(options) == 0 {
 			lines = append(lines, styleDim.Render("no matching SSH config hosts"))
 		} else {
-			if d.sourceCursor >= len(options) {
-				d.sourceCursor = len(options) - 1
+			cursor := d.sourceCursor
+			if cursor >= len(options) {
+				cursor = len(options) - 1
 			}
 			listHeight := maxInt(1, height-len(lines)-1)
 			start := 0
-			if d.sourceCursor >= listHeight {
-				start = d.sourceCursor - listHeight + 1
+			if cursor >= listHeight {
+				start = cursor - listHeight + 1
 			}
 			end := minInt(len(options), start+listHeight)
 			for i := start; i < end; i++ {
@@ -912,7 +973,7 @@ func (m *Model) viewSSHWizard(width, height int) string {
 					label = "Custom server (hostname / user)"
 				}
 				line := "  " + label
-				if i == d.sourceCursor {
+				if i == cursor {
 					line = styleSelect.Render(padRight(line, width))
 				}
 				lines = append(lines, line)
@@ -968,22 +1029,37 @@ func (m *Model) viewSSHWizard(width, height int) string {
 		lines = append(lines, "")
 		visible := d.visibleBundles()
 		if len(visible) == 0 {
-			lines = append(lines, styleDim.Render("no bundles available; create one in the Bundles tab"))
+			switch {
+			case d.bundleQuery != "":
+				lines = append(lines, styleDim.Render("no bundles match the filter"))
+			case len(d.bundles) > 0:
+				lines = append(lines, styleDim.Render("no SSH-capable bundle; build one for linux or darwin"))
+			default:
+				lines = append(lines, styleDim.Render("no bundles available; create one in the Bundles tab"))
+			}
+			if d.err != "" {
+				lines = append(lines, "", styleErr.Render(d.err))
+			}
 			return strings.Join(fitLines(lines, width, height), "\n")
 		}
-		if d.bundleCursor >= len(visible) {
-			d.bundleCursor = len(visible) - 1
+		cursor := d.bundleCursor
+		if cursor >= len(visible) {
+			cursor = len(visible) - 1
 		}
 		listHeight := maxInt(1, height-len(lines)-1)
 		start := 0
-		if d.bundleCursor >= listHeight {
-			start = d.bundleCursor - listHeight + 1
+		if cursor >= listHeight {
+			start = cursor - listHeight + 1
 		}
 		end := minInt(len(visible), start+listHeight)
 		for i := start; i < end; i++ {
 			b := d.bundles[visible[i]]
-			line := fmt.Sprintf("  %-20s %-14s %s", truncate(b.Name, 20), b.Target, frozenLabel(b.Frozen))
-			if i == d.bundleCursor {
+			tag := frozenLabel(b.Frozen)
+			if problem := bundleSSHProblem(b); problem != "" {
+				tag = "not for SSH"
+			}
+			line := fmt.Sprintf("  %-20s %-14s %s", truncate(b.Name, 20), b.Target, tag)
+			if i == cursor {
 				line = styleSelect.Render(padRight(line, width))
 			}
 			lines = append(lines, line)

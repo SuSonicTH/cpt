@@ -28,6 +28,17 @@ const (
 	SourceCustom = "custom"
 )
 
+// reservedNames are cpt ssh subcommand names. A target with one of these names
+// could never be reached through the documented `cpt ssh <name>` short form, so
+// they are rejected when the target is saved.
+var reservedNames = map[string]bool{
+	"list": true, "ls": true,
+	"add": true, "create": true,
+	"edit": true, "update": true,
+	"remove": true, "rm": true, "delete": true,
+	"connect": true, "help": true,
+}
+
 // Remote shell choices. Auto asks the remote host.
 const (
 	ShellAuto = "auto"
@@ -153,13 +164,21 @@ func (f *File) Get(name string) (*Target, error) {
 	return t, nil
 }
 
-// Put inserts or replaces a target.
+// IsReservedName reports whether name is a cpt ssh subcommand and therefore
+// cannot be used as a target name.
+func IsReservedName(name string) bool { return reservedNames[name] }
+
+// Put inserts or replaces a target. Reserved names are rejected here rather
+// than in Validate, so an ssh.json written by an older build still loads.
 func (f *File) Put(t *Target) error {
 	if t == nil {
 		return fmt.Errorf("nil SSH target")
 	}
 	if err := t.Validate(); err != nil {
 		return err
+	}
+	if IsReservedName(t.Name) {
+		return fmt.Errorf("target name %q is reserved by a cpt ssh subcommand", t.Name)
 	}
 	f.Targets[t.Name] = t
 	return nil
@@ -231,7 +250,9 @@ func (t *Target) CacheFresh(now time.Time, bundleSHA string) bool {
 	return t.CopiedKey == t.CopyKey(bundleSHA)
 }
 
-// Validate checks every field used to build local and remote commands.
+// Validate checks every field used to build local and remote commands. It also
+// normalises RemoteRoot and Shell in place; Load, Put, and Save call it so the
+// stored file is always canonical.
 func (t *Target) Validate() error {
 	if t == nil {
 		return fmt.Errorf("empty target")

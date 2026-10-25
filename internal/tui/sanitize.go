@@ -1,6 +1,9 @@
 package tui
 
-import "github.com/SuSonicTH/cpt/internal/app"
+import (
+	"github.com/SuSonicTH/cpt/internal/app"
+	"github.com/SuSonicTH/cpt/internal/sshtarget"
+)
 
 // List, log and snippet text is remote input. Strip terminal control sequences
 // before it reaches the renderer so a list cannot spoof the approval UI.
@@ -58,6 +61,15 @@ func sanitizeShells(shells []app.ShellInfo) []app.ShellInfo {
 		info.PendingVersion = sanitize(info.PendingVersion, false)
 		info.LastError = sanitize(info.LastError, false)
 		out[i] = info
+	}
+	return out
+}
+
+func sanitizeSSHHosts(hosts []sshtarget.ConfigHost) []sshtarget.ConfigHost {
+	out := make([]sshtarget.ConfigHost, len(hosts))
+	for i, h := range hosts {
+		h.Alias = sanitize(h.Alias, false)
+		out[i] = h
 	}
 	return out
 }

@@ -104,9 +104,12 @@ func parseConfigFile(file string, aliases, visited map[string]bool, depth int) e
 					return fmt.Errorf("ssh config include %q: %w", pattern, globErr)
 				}
 				for _, match := range matches {
-					if err := parseConfigFile(match, aliases, visited, depth+1); err != nil && !os.IsNotExist(err) {
-						return err
+					// Includes are best-effort: a directory matched by a glob, or an
+					// unreadable include, must not hide every other alias.
+					if info, statErr := os.Stat(match); statErr != nil || !info.Mode().IsRegular() {
+						continue
 					}
+					_ = parseConfigFile(match, aliases, visited, depth+1)
 				}
 			}
 		}
@@ -172,12 +175,17 @@ func configFields(value string) []string {
 }
 
 func expandHome(path string) string {
-	if path == "~" || strings.HasPrefix(path, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, strings.TrimPrefix(path, "~/"))
-		}
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path
 	}
-	return path
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	return filepath.Join(home, strings.TrimPrefix(path, "~/"))
 }
 
 // Resolve asks OpenSSH for the effective values of an alias. It never connects

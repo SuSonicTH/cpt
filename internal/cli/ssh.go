@@ -106,7 +106,16 @@ func cmdSSH(ctx context.Context, a *app.App, args []string) error {
 		fmt.Fprint(a.Out.Out, sshUsage)
 		return nil
 	default:
-		return cmdSSHConnect(ctx, a, args)
+		// The short form is `cpt ssh <target>`. Only fall back to connect when
+		// the argument really names a saved target; otherwise report the
+		// unknown subcommand, as every other command group does. A load failure
+		// is reported as itself rather than as an unknown name.
+		if _, err := a.SSHTarget(args[0]); err == nil {
+			return cmdSSHConnect(ctx, a, args)
+		} else if cerr.KindOf(err) != cerr.Usage {
+			return err
+		}
+		return cerr.New(cerr.Usage, "unknown ssh subcommand %q (or unknown SSH target; see `cpt ssh list`)", args[0])
 	}
 }
 
@@ -232,62 +241,63 @@ func cmdSSHEdit(ctx context.Context, a *app.App, args []string) error {
 	if len(fs.Args()) != 1 {
 		return cerr.New(cerr.Usage, "usage: cpt ssh edit <name> [flags]")
 	}
-	t, err := a.SSHTarget(fs.Args()[0])
-	if err != nil {
-		return err
-	}
 	seen := visitedFlags(fs)
 	if seen["config-host"] && seen["host"] {
 		return cerr.New(cerr.Usage, "use either --config-host or --host, not both")
 	}
-	if seen["bundle"] {
-		t.Bundle = strings.TrimSpace(*flags.bundle)
-	}
-	if seen["config-host"] {
-		t.SSH.Source = sshtarget.SourceConfig
-		t.SSH.Host = strings.TrimSpace(*flags.configHost)
-	}
-	if seen["host"] {
-		t.SSH.Source = sshtarget.SourceCustom
-		t.SSH.Host = strings.TrimSpace(*flags.host)
-	}
-	if seen["user"] {
-		t.SSH.User = strings.TrimSpace(*flags.user)
-	}
-	if seen["port"] {
-		t.SSH.Port = *flags.port
-	}
-	if seen["identity"] {
-		t.SSH.IdentityFile = strings.TrimSpace(*flags.identity)
-	}
-	if seen["proxy-jump"] {
-		t.SSH.ProxyJump = strings.TrimSpace(*flags.proxyJump)
-	}
-	if seen["remote-root"] {
-		t.RemoteRoot = strings.TrimSpace(*flags.remoteRoot)
-	}
-	if seen["shell"] {
-		t.Shell = strings.TrimSpace(*flags.shell)
-	}
 	if seen["cleanup"] && seen["no-cleanup"] {
 		return cerr.New(cerr.Usage, "use either --cleanup or --no-cleanup, not both")
-	}
-	if seen["cleanup"] {
-		t.CleanupOnExit = *flags.cleanup
-	}
-	if seen["no-cleanup"] {
-		t.CleanupOnExit = false
 	}
 	if seen["force"] && seen["no-force"] {
 		return cerr.New(cerr.Usage, "use either --force or --no-force, not both")
 	}
-	if seen["force"] {
-		t.Force = *flags.force
-	}
-	if seen["no-force"] {
-		t.Force = false
-	}
-	if err := a.SaveSSHTarget(t); err != nil {
+	// Mutate under the ssh.json lock so a concurrent edit cannot drop fields
+	// that were read before this command started.
+	t, err := a.UpdateSSHTarget(fs.Args()[0], func(t *sshtarget.Target) error {
+		if seen["bundle"] {
+			t.Bundle = strings.TrimSpace(*flags.bundle)
+		}
+		if seen["config-host"] {
+			t.SSH.Source = sshtarget.SourceConfig
+			t.SSH.Host = strings.TrimSpace(*flags.configHost)
+		}
+		if seen["host"] {
+			t.SSH.Source = sshtarget.SourceCustom
+			t.SSH.Host = strings.TrimSpace(*flags.host)
+		}
+		if seen["user"] {
+			t.SSH.User = strings.TrimSpace(*flags.user)
+		}
+		if seen["port"] {
+			t.SSH.Port = *flags.port
+		}
+		if seen["identity"] {
+			t.SSH.IdentityFile = strings.TrimSpace(*flags.identity)
+		}
+		if seen["proxy-jump"] {
+			t.SSH.ProxyJump = strings.TrimSpace(*flags.proxyJump)
+		}
+		if seen["remote-root"] {
+			t.RemoteRoot = strings.TrimSpace(*flags.remoteRoot)
+		}
+		if seen["shell"] {
+			t.Shell = strings.TrimSpace(*flags.shell)
+		}
+		if seen["cleanup"] {
+			t.CleanupOnExit = *flags.cleanup
+		}
+		if seen["no-cleanup"] {
+			t.CleanupOnExit = false
+		}
+		if seen["force"] {
+			t.Force = *flags.force
+		}
+		if seen["no-force"] {
+			t.Force = false
+		}
+		return nil
+	})
+	if err != nil {
 		return err
 	}
 	if a.Out.JSON {

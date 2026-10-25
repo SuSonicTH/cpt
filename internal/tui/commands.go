@@ -309,10 +309,17 @@ func bundleRebuildCmd(ctx context.Context, a *app.App, name string) tea.Cmd {
 	}
 }
 
-func sshTargetSaveCmd(ctx context.Context, a *app.App, t *sshtarget.Target) tea.Cmd {
+// sshSaveFailedMsg reopens the wizard with the draft that failed to save, so a
+// validation error does not discard the five steps of input already entered.
+type sshSaveFailedMsg struct {
+	err   error
+	draft *sshDraft
+}
+
+func sshTargetSaveCmd(ctx context.Context, a *app.App, t *sshtarget.Target, d *sshDraft) tea.Cmd {
 	return func() tea.Msg {
 		if err := a.SaveSSHTarget(t); err != nil {
-			return actionDoneMsg{err: err}
+			return sshSaveFailedMsg{err: err, draft: d}
 		}
 		return actionDoneMsg{status: "saved SSH target " + t.Name}
 	}

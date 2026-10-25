@@ -121,7 +121,9 @@ given):
 ```
 
 Exit codes: `0` success, `1` generic, `2` usage, `3` integrity failure,
-`4` conflict, `5` network.
+`4` conflict, `5` network. `cpt ssh <target>` additionally returns the remote
+shell's own exit status unchanged; see
+[docs/ssh-targets.md](docs/ssh-targets.md#exit-status).
 
 ## Package lists
 
@@ -349,8 +351,9 @@ Targets are stored in `~/.cpt/ssh.json`. A target can reference an OpenSSH confi
 alias or an explicit host/user/port/identity/ProxyJump combination. The remote
 root defaults to `~/.cpt` and can be changed per target.
 
-The remote bundle copy is cached locally and on the remote host for 24 hours
-unless cleanup is enabled. A fresh cache opens only the shell with `cptinit`; a
+`cpt` records the copy in `ssh.json` and reuses the remote copy for 24 hours
+unless cleanup is enabled; after that, or when the bundle or settings change, it
+copies again. A fresh cache opens only the shell with `cptinit`; a
 rebuilt bundle or changed connection settings makes the next connect copy and
 run it again. `--cleanup` removes the remote root after the shell exits; it is
 off by default. M6 supports Linux/macOS remotes with `bash`, `zsh` or `sh`. See

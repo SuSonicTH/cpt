@@ -570,12 +570,13 @@ func (m *Model) viewBundleWizardPackages(width, height int) string {
 		}
 		return strings.Join(fitLines(lines, width, height), "\n")
 	}
-	if d.packageOffset >= len(visible) {
-		d.packageOffset = maxInt(0, len(visible)-1)
+	offset := d.packageOffset
+	if offset >= len(visible) {
+		offset = maxInt(0, len(visible)-1)
 	}
 	listHeight := maxInt(1, height-len(lines)-1)
-	end := minInt(len(visible), d.packageOffset+listHeight)
-	for i := d.packageOffset; i < end; i++ {
+	end := minInt(len(visible), offset+listHeight)
+	for i := offset; i < end; i++ {
 		c := &d.candidates[visible[i]]
 		line := m.bundlePackageLine(c, width, i == d.packageCursor)
 		if i == d.packageCursor {

@@ -3,11 +3,14 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SuSonicTH/cpt/internal/bundle"
 	"github.com/SuSonicTH/cpt/internal/cerr"
@@ -98,6 +101,11 @@ exit "${CPT_FAKE_SCP_EXIT:-0}"
   for a in "$@"; do printf '\t%s' "$a"; done
   printf '\n'
 } >> "$CPT_FAKE_LOG"
+for a in "$@"; do
+  if [ "$a" = "-tt" ]; then
+    exit "${CPT_FAKE_SHELL_EXIT:-${CPT_FAKE_SSH_EXIT:-0}}"
+  fi
+done
 exit "${CPT_FAKE_SSH_EXIT:-0}"
 `)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -167,6 +175,9 @@ func TestSSHConnectCopiesThenUsesCache(t *testing.T) {
 	}
 	if !strings.Contains(log, "sh -c") {
 		t.Fatalf("second session did not run the bootstrap:\n%s", log)
+	}
+	if got := strings.Count(log, "ssh\t"); got != 2 {
+		t.Fatalf("cached connect made %d ssh calls, want a prepare plus a session:\n%s", got, log)
 	}
 }
 
@@ -251,7 +262,8 @@ func TestSSHConnectErrors(t *testing.T) {
 		t.Fatalf("unsupported shell error = %v, kind = %v", err, cerr.KindOf(err))
 	}
 
-	t.Setenv("CPT_FAKE_SSH_EXIT", "7")
+	t.Setenv("CPT_FAKE_SSH_EXIT", "0")
+	t.Setenv("CPT_FAKE_SHELL_EXIT", "7")
 	_, err := a.SSHConnect(context.Background(), "staging", opt)
 	if err == nil {
 		t.Fatal("session failure was ignored")
@@ -316,8 +328,8 @@ exit 240
 		t.Fatalf("fallback result = %+v", res)
 	}
 	log := readLog(t, logPath)
-	if strings.Count(log, "ssh\t") != 2 {
-		t.Fatalf("expected shell-check plus install session:\n%s", log)
+	if strings.Count(log, "ssh\t") != 3 {
+		t.Fatalf("expected cache check, install prepare, and session:\n%s", log)
 	}
 	if !strings.Contains(log, "scp\t") {
 		t.Fatalf("fallback did not upload:\n%s", log)
@@ -411,5 +423,134 @@ func TestSSHConnectCopyFailureIsNetworkError(t *testing.T) {
 	})
 	if err == nil || cerr.KindOf(err) != cerr.Network {
 		t.Fatalf("copy failure = %v kind=%v", err, cerr.KindOf(err))
+	}
+	if code := cerr.ExitCode(err); code != int(cerr.Network) {
+		t.Fatalf("copy failure exit code = %d, want %d; the wrapped scp status must not override the documented network code", code, int(cerr.Network))
+	}
+}
+
+// TestSSHConnectSessionStatusIsNotASentinel guards the split-transport fix: a
+// user's shell can exit with 240/241/242 without being mistaken for a prepare
+// sentinel, so it never triggers a reinstall or a bogus platform error.
+func TestSSHConnectSessionStatusIsNotASentinel(t *testing.T) {
+	a, _ := sshTestApp(t)
+	logPath := installFakeSSHTools(t)
+	if err := a.SaveSSHTarget(&sshtarget.Target{
+		Name:   "staging",
+		Bundle: "devbox",
+		SSH:    sshtarget.SSH{Source: sshtarget.SourceCustom, Host: "box"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	opt := SSHConnectOptions{Stdin: strings.NewReader(""), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if _, err := a.SSHConnect(context.Background(), "staging", opt); err != nil {
+		t.Fatalf("prime connect: %v", err)
+	}
+	for _, code := range []string{"240", "241", "242"} {
+		code := code
+		t.Run(code, func(t *testing.T) {
+			if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CPT_FAKE_SHELL_EXIT", code)
+			_, err := a.SSHConnect(context.Background(), "staging", opt)
+			var se *SSHSessionError
+			if !errors.As(err, &se) {
+				t.Fatalf("session status %s was not reported as a session status: %v", code, err)
+			}
+			if strconv.Itoa(se.Code) != code {
+				t.Fatalf("session status = %d, want %s", se.Code, code)
+			}
+			if got := cerr.ExitCode(err); got != se.Code {
+				t.Fatalf("cerr.ExitCode = %d, want the session status %d", got, se.Code)
+			}
+			log := readLog(t, logPath)
+			if strings.Contains(log, "scp\t") {
+				t.Fatalf("session status %s triggered a reinstall:\n%s", code, log)
+			}
+			if got := strings.Count(log, "ssh\t"); got != 2 {
+				t.Fatalf("session status %s made %d ssh calls, want prepare plus session:\n%s", code, got, log)
+			}
+		})
+	}
+}
+
+// TestSSHConnectFailedInstallLeavesNoCache records the copy only after the
+// prepare phase succeeds, so a failed install cannot claim a fresh cache or a
+// completed connection.
+func TestSSHConnectFailedInstallLeavesNoCache(t *testing.T) {
+	a, _ := sshTestApp(t)
+	installFakeSSHTools(t)
+	if err := a.SaveSSHTarget(&sshtarget.Target{
+		Name:   "staging",
+		Bundle: "devbox",
+		SSH:    sshtarget.SSH{Source: sshtarget.SourceCustom, Host: "box"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CPT_FAKE_SSH_EXIT", "9")
+	_, err := a.SSHConnect(context.Background(), "staging", SSHConnectOptions{
+		Stdin: strings.NewReader(""), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+	})
+	if err == nil || cerr.KindOf(err) == cerr.Network {
+		t.Fatalf("prepare failure = %v kind=%v, want an install error", err, cerr.KindOf(err))
+	}
+	target, err := a.SSHTarget("staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !target.LastCopied.IsZero() || target.CopiedSHA256 != "" || target.CopiedKey != "" {
+		t.Fatalf("failed install recorded a copy cache: %+v", target)
+	}
+	if !target.LastConnected.IsZero() {
+		t.Fatalf("failed install recorded a connection: %+v", target)
+	}
+	infos, err := a.SSHTargets(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(infos) != 1 || infos[0].CacheFresh {
+		t.Fatalf("failed install reported a fresh cache: %+v", infos)
+	}
+}
+
+// TestSSHConnectCancellationIsNotGeneric covers the cancelled prepare path: it
+// must report the conventional signal status and must not record a cache that
+// was never written.
+func TestSSHConnectCancellationIsNotGeneric(t *testing.T) {
+	a, _ := sshTestApp(t)
+	_, dir := installFakeSSHToolsDir(t)
+	// A hanging ssh lets the parent context cancel mid-phase.
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte("#!/bin/sh\nsleep 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SaveSSHTarget(&sshtarget.Target{
+		Name:   "staging",
+		Bundle: "devbox",
+		SSH:    sshtarget.SSH{Source: sshtarget.SourceCustom, Host: "box"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		cancel()
+	}()
+	_, err := a.SSHConnect(ctx, "staging", SSHConnectOptions{
+		Stdin: strings.NewReader(""), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("cancelled connect returned no error")
+	}
+	code := cerr.ExitCode(err)
+	if code != 130 && code != 137 && code != 143 {
+		t.Fatalf("cancelled connect exit = %d, want a signal status (130/137/143); err=%v", code, err)
+	}
+	target, err := a.SSHTarget("staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !target.LastCopied.IsZero() || !target.LastConnected.IsZero() {
+		t.Fatalf("cancelled prepare recorded progress: %+v", target)
 	}
 }

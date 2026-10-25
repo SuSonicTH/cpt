@@ -41,7 +41,7 @@ Target flags:
 | `--identity PATH` | Identity file |
 | `--proxy-jump SPEC` | ProxyJump destination |
 | `--remote-root PATH` | Absolute remote cpt root; default `~/.cpt` |
-| `--shell SHELL` | `auto`, `bash`, `zsh` or `sh` |
+| `--shell SHELL` | `auto`, `bash`, `zsh` or `sh`; `auto` uses the remote `$SHELL` and fails with a usage error for hosts whose login shell is not POSIX (set `--shell bash` instead) |
 | `--cleanup` / `--no-cleanup` | Remove the remote root after the session |
 | `--force` / `--no-force` | Pass `--force` to the remote bundle |
 
@@ -88,6 +88,11 @@ Targets live in `~/.cpt/ssh.json` (schema 1, mode 0600 on POSIX):
 - `remote_root` empty means remote `~/.cpt`. A custom value must be an absolute
   POSIX path without `..`. Cleanup additionally requires a nested path such as
   `/srv/cpt`, not a top-level directory such as `/tmp`.
+- Target names are identifiers, not subcommands. The reserved names are
+  `list`, `ls`, `add`, `create`, `edit`, `update`, `remove`, `rm`, `delete`,
+  `connect` and `help`; they are rejected when a target is saved (and in the TUI
+  wizard), so `cpt ssh <name>` always names a target. `cpt ssh add` updates an
+  existing target of the same name.
 - No password or passphrase is stored. Authentication is handled by the system
   `ssh`/`scp` (agent, key file, keyboard-interactive).
 
@@ -97,12 +102,20 @@ the detail pane come from `ssh -G`.
 
 ## Connect flow
 
+A connect uses two short-lived `ssh` invocations rather than one. The first is a
+non-interactive **prepare** phase that validates or installs the remote copy and
+owns the sentinel exit codes. The second is the interactive **shell** phase,
+whose exit status is the user's session status and is never reinterpreted. The
+split is what keeps a session status such as `240` from being mistaken for a
+cache-invalid sentinel.
+
 1. Resolve the target and its bundle locally.
 2. If the copy cache is stale, upload the bundle with `scp` to
    `$HOME/.cpt-ssh-upload-<target>.bundle`.
-3. Start `ssh -tt` with a generated POSIX bootstrap.
-4. In install mode, the bootstrap runs the uploaded bundle directly against the
-   remote root, so a first install still sees a clean destination:
+3. Run `ssh -T` with the generated prepare script, which checks the remote
+   platform and the remote shell, then installs or validates the cache.
+4. In install mode, the prepare phase runs the uploaded bundle directly against
+   the remote root, so a first install still sees a clean destination:
 
    ```sh
    <uploaded-bundle> --dest <remote_root>
@@ -111,8 +124,9 @@ the detail pane come from `ssh -G`.
    After the install succeeds and `cptinit` exists, it creates the remote root's
    `incoming/` directory, moves the uploaded bundle there as the cache, and
    writes a cache marker. It never passes `--install-init`.
-5. The bootstrap starts the requested shell with a temporary rc that sources the
-   user's normal rc and then `<remote_root>/cptinit.sh`:
+5. Only after the prepare phase succeeds does `ssh -tt` start the requested shell
+   with a temporary rc that sources the user's normal rc and then
+   `<remote_root>/cptinit.sh`:
    - bash: `--rcfile`
    - zsh: temporary `ZDOTDIR`
    - sh/dash/ash/ksh: `ENV`
@@ -123,10 +137,16 @@ The remote bootstrap probes `uname -s` and `uname -m` and aborts before
 installation if the host does not match the bundle's target platform. The bundle
 itself also performs its own platform check.
 
+The shell phase allocates a remote pty (`ssh -tt`) because it is interactive.
+Redirecting it (`cpt ssh staging > session.log`) therefore captures CRLF line
+endings and terminal control output; use `cpt ssh list --json` or the TUI for
+machine-readable data instead.
+
 ## Copy cache
 
 The target stores `last_copied`, the bundle SHA256 and a key derived from the
-bundle and connection settings.
+bundle and connection settings. These are written only after the prepare phase
+succeeds, so a failed install never reports a fresh cache.
 
 - A fresh copy is reused for 24 hours unless `cleanup_on_exit` is enabled.
 - A fresh copy starts **only the interactive shell** with `cptinit`; the bundle
@@ -134,10 +154,37 @@ bundle and connection settings.
 - Rebuilding the bundle changes its hash, so the next connect copies and runs it.
 - Editing the bundle reference or connection settings invalidates the cache.
 - A missing remote bundle, missing `cptinit`, or missing cache marker makes the
-  remote bootstrap return a dedicated status. `cpt` then uploads and installs
+  prepare phase return its cache-invalid status. `cpt` then uploads and installs
   once and retries.
 - Targets with `cleanup_on_exit` always copy and install, because cleanup removes
   the cached bundle.
+
+## Exit status
+
+The interactive session's status is returned unchanged:
+
+| Code | Meaning |
+|---|---|
+| `0` | The remote shell exited successfully |
+| `1` | Generic `cpt` failure before the session started |
+| `2` | Usage error, including an unsupported remote shell |
+| `3` | Integrity failure: the remote cache could not be refreshed |
+| `4` | The remote platform does not match the bundle target |
+| `5` | Network failure: `ssh` or `scp` could not connect or copy |
+| other | The remote shell's own exit status, as-is |
+
+During the shell phase, an `ssh` connect/auth failure returns `255` as-is (it is
+`ssh`'s own status), and a remote environment that disappeared between the two
+phases exits `1`. During the prepare phase, `240` (cache invalid), `241`
+(platform mismatch) and `242` (unsupported shell) are internal sentinels and
+never reach the caller. A
+session that exits with one of those codes reports it as a normal status, not as
+a cache or platform error. A cancelled session reports `130` (interrupt) or
+`128+signal` when the child reported a signal death.
+
+A failed install can leave a partial remote root behind; `cpt` does not delete it
+automatically, because the root also holds previously installed tools. Fix the
+cause and connect again, or remove the configured remote root yourself.
 
 ## Cleanup
 
@@ -154,8 +201,12 @@ environment and cached bundle. The local target and local bundles are untouched.
 
 ## Security notes
 
-- Remote command values are validated and single-quoted; target fields are not
-  interpolated into a shell command unquoted.
+- Every remote value is validated and single-quoted before it reaches the
+  remote shell. Two tokens, the target name and the upload filename, appear
+  inside double quotes without their own quoting; that is safe only because
+  both are restricted to `^[A-Za-z0-9][A-Za-z0-9._-]*$` by `bundle.ValidName`,
+  and the local side never builds a shell string (all local execution is argv
+  based, so host, user and alias values cannot word-split or inject).
 - The bootstrap applies `umask 077` and chmods the uploaded bundle to `0700`
   before executing it from the user's own home/root.
 - `cptinit` is loaded only for the current session. No remote startup file is

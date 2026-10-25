@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"syscall"
 	"time"
 
 	"github.com/SuSonicTH/cpt/internal/bundle"
@@ -60,8 +61,8 @@ func (e *SSHSessionError) Error() string {
 	return fmt.Sprintf("SSH session for %s exited with status %d", e.Target, e.Code)
 }
 
-// ExitCode implements the exit-code interface used by cerr.ExitCode.
-func (e *SSHSessionError) ExitCode() int { return e.Code }
+// CerrExitStatus reports the remote shell's status instead of a cerr kind.
+func (e *SSHSessionError) CerrExitStatus() int { return e.Code }
 
 func (a *App) withSSHFile(fn func(*sshtarget.File) error) error {
 	lock, err := state.Acquire(a.Paths.SSHLockFile, 5*time.Second)
@@ -153,11 +154,52 @@ func sortSSHTargets(out []SSHTargetInfo) {
 // SaveSSHTarget creates or updates one target. Bundle references must name an
 // existing manifest.
 func (a *App) SaveSSHTarget(t *sshtarget.Target) error {
+	if err := a.validateSSHTarget(t); err != nil {
+		return err
+	}
+	return a.withSSHFile(func(f *sshtarget.File) error {
+		return mergeSSHTarget(f, t)
+	})
+}
+
+// UpdateSSHTarget applies mutate to one saved target while holding the ssh.json
+// lock, so a concurrent editor cannot silently drop the fields it read earlier.
+func (a *App) UpdateSSHTarget(name string, mutate func(*sshtarget.Target) error) (*sshtarget.Target, error) {
+	var out *sshtarget.Target
+	err := a.withSSHFile(func(f *sshtarget.File) error {
+		cur, err := f.Get(name)
+		if err != nil {
+			return cerr.New(cerr.Usage, "%v", err)
+		}
+		work := *cur
+		if err := mutate(&work); err != nil {
+			return err
+		}
+		if err := a.validateSSHTarget(&work); err != nil {
+			return err
+		}
+		if err := mergeSSHTarget(f, &work); err != nil {
+			return err
+		}
+		out = &work
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// validateSSHTarget checks the bundle reference used by a target.
+func (a *App) validateSSHTarget(t *sshtarget.Target) error {
 	if t == nil {
 		return cerr.New(cerr.Usage, "no SSH target supplied")
 	}
 	if err := t.Validate(); err != nil {
 		return cerr.New(cerr.Usage, "%v", err)
+	}
+	if sshtarget.IsReservedName(t.Name) {
+		return cerr.New(cerr.Usage, "target name %q is reserved by a cpt ssh subcommand", t.Name)
 	}
 	manifestPath := bundleManifestPath(a.Paths.Bundles, t.Bundle)
 	m, err := bundle.LoadManifest(manifestPath)
@@ -173,34 +215,38 @@ func (a *App) SaveSSHTarget(t *sshtarget.Target) error {
 	if !bundle.IsBundle(m.OutputPath(a.Paths.Bundles)) {
 		return cerr.New(cerr.Usage, "bundle %q has no valid executable; rebuild it before adding the SSH target", t.Bundle)
 	}
-	return a.withSSHFile(func(f *sshtarget.File) error {
-		now := time.Now().UTC()
-		prev := f.Targets[t.Name]
-		if prev != nil {
-			if t.Created.IsZero() {
-				t.Created = prev.Created
-			}
-			t.LastConnected = prev.LastConnected
-			if sameCopySettings(prev, t) {
-				t.LastCopied = prev.LastCopied
-				t.CopiedSHA256 = prev.CopiedSHA256
-				t.CopiedKey = prev.CopiedKey
-			} else {
-				t.LastCopied = time.Time{}
-				t.CopiedSHA256 = ""
-				t.CopiedKey = ""
-			}
+	return nil
+}
+
+// mergeSSHTarget writes t into f while preserving metadata that a saved target
+// owns and an editor must not invent.
+func mergeSSHTarget(f *sshtarget.File, t *sshtarget.Target) error {
+	now := time.Now().UTC()
+	prev := f.Targets[t.Name]
+	if prev != nil {
+		if t.Created.IsZero() {
+			t.Created = prev.Created
+		}
+		t.LastConnected = prev.LastConnected
+		if sameCopySettings(prev, t) {
+			t.LastCopied = prev.LastCopied
+			t.CopiedSHA256 = prev.CopiedSHA256
+			t.CopiedKey = prev.CopiedKey
 		} else {
 			t.LastCopied = time.Time{}
 			t.CopiedSHA256 = ""
 			t.CopiedKey = ""
 		}
-		if t.Created.IsZero() {
-			t.Created = now
-		}
-		t.Updated = now
-		return f.Put(t)
-	})
+	} else {
+		t.LastCopied = time.Time{}
+		t.CopiedSHA256 = ""
+		t.CopiedKey = ""
+	}
+	if t.Created.IsZero() {
+		t.Created = now
+	}
+	t.Updated = now
+	return f.Put(t)
 }
 
 func sameCopySettings(a, b *sshtarget.Target) bool {
@@ -321,6 +367,10 @@ func (a *App) SSHConnect(ctx context.Context, name string, opt SSHConnectOptions
 		BundleSHA256: sha,
 	}
 	copyKey := target.CopyKey(sha)
+	// The prepare phase is non-interactive and owns the sentinel exit codes, so a
+	// status the user's shell returns can never be mistaken for one. The shell
+	// phase starts only after prepare succeeds, and its status is propagated as
+	// the session's own.
 	for attempt := 0; attempt < 2; attempt++ {
 		if plan.Mode == sshtarget.ModeInstall {
 			copyCmd := plan.UploadCommand(ctx)
@@ -333,43 +383,72 @@ func (a *App) SSHConnect(ctx context.Context, name string, opt SSHConnectOptions
 			}
 			result.Copied = true
 			result.Mode = sshtarget.ModeInstall
-			_ = a.recordSSHCopy(target.Name, sha, copyKey, now)
 		}
-		session := plan.SessionCommand(ctx)
-		session.Stdin, session.Stdout, session.Stderr = ioOpt.Stdin, ioOpt.Stdout, ioOpt.Stderr
-		runErr := session.Run()
-		if runErr != nil {
-			var execErr *exec.Error
-			if errors.As(runErr, &execErr) {
-				return result, fmt.Errorf("cannot run ssh: %w", runErr)
+
+		prepare := plan.PrepareCommand(ctx)
+		prepare.Stdin, prepare.Stdout, prepare.Stderr = ioOpt.Stdin, ioOpt.Stdout, ioOpt.Stderr
+		prepareErr := prepare.Run()
+		if code := commandExitCode(prepareErr); code == 0 {
+			// The remote copy is usable. Record it only now, so a failed install
+			// never claims a fresh cache. A cancellation after the phase finished
+			// must still keep the cache that was just written.
+			if plan.Mode == sshtarget.ModeInstall {
+				_ = a.recordSSHCopy(target.Name, sha, copyKey, now)
+			}
+			if ctx.Err() != nil {
+				return result, &SSHSessionError{Target: target.Name, Code: 130}
+			}
+		} else if ctx.Err() != nil {
+			// The phase was interrupted before it could report a status.
+			if code <= 1 {
+				code = 130
+			}
+			return result, &SSHSessionError{Target: target.Name, Code: code}
+		} else {
+			switch code {
+			case sshtarget.ExitCacheInvalid:
+				if attempt == 0 {
+					plan.Mode = sshtarget.ModeInstall
+					result.Copied = false
+					continue
+				}
+				return result, cerr.New(cerr.Integrity,
+					"remote bundle cache for %s could not be refreshed; check that the remote home is writable", target.Name)
+			case sshtarget.ExitPlatformMismatch:
+				return result, cerr.New(cerr.Conflict,
+					"bundle %s targets %s but the remote host reports a different platform", target.Bundle, m.Target)
+			case sshtarget.ExitUnsupportedShell:
+				return result, cerr.New(cerr.Usage,
+					"the remote shell is not supported; configure bash, zsh or sh for target %s", target.Name)
+			case 255:
+				return result, cerr.Wrap(cerr.Network, fmt.Errorf("prepare %s: %w", target.Destination(), prepareErr))
+			default:
+				return result, fmt.Errorf("install bundle %s on %s: %w", target.Bundle, target.Destination(), prepareErr)
 			}
 		}
-		code := commandExitCode(runErr)
+
+		shell := plan.ShellCommand(ctx)
+		shell.Stdin, shell.Stdout, shell.Stderr = ioOpt.Stdin, ioOpt.Stdout, ioOpt.Stderr
+		runErr := shell.Run()
 		if runErr == nil {
 			result.ExitCode = 0
 			_ = a.recordSSHConnected(target.Name)
 			return result, nil
 		}
-		if ctx.Err() != nil {
-			return result, ctx.Err()
+		var execErr *exec.Error
+		if errors.As(runErr, &execErr) {
+			return result, fmt.Errorf("cannot run ssh: %w", runErr)
 		}
-		switch code {
-		case sshtarget.ExitCacheInvalid:
-			if attempt == 0 {
-				plan.Mode = sshtarget.ModeInstall
-				continue
-			}
-			return result, cerr.New(cerr.Integrity,
-				"remote bundle cache for %s could not be refreshed; check that the remote home is writable", target.Name)
-		case sshtarget.ExitPlatformMismatch:
-			return result, cerr.New(cerr.Conflict,
-				"bundle %s targets %s but the remote host reports a different platform", target.Bundle, m.Target)
-		case sshtarget.ExitUnsupportedShell:
-			return result, cerr.New(cerr.Usage,
-				"the remote shell is not supported; configure bash, zsh or sh for target %s", target.Name)
+		code := commandExitCode(runErr)
+		if ctx.Err() != nil && code <= 1 {
+			// The session was cancelled before it could report a status.
+			code = 130
 		}
 		result.ExitCode = code
-		_ = a.recordSSHConnected(target.Name)
+		if code != 255 {
+			// 255 is ssh's own connect/auth failure: no session was established.
+			_ = a.recordSSHConnected(target.Name)
+		}
 		return result, &SSHSessionError{Target: target.Name, Code: code}
 	}
 	return result, cerr.New(cerr.Integrity, "remote bundle cache for %s could not be refreshed", target.Name)
@@ -379,10 +458,17 @@ func commandExitCode(err error) int {
 	if err == nil {
 		return 0
 	}
-	var exitErr interface{ ExitCode() int }
+	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		if code := exitErr.ExitCode(); code > 0 {
+		if code := exitErr.ExitCode(); code > 0 && code < 256 {
 			return code
+		}
+		// A child killed by a signal reports -1; return the conventional
+		// 128+signal status instead of a generic failure.
+		if ps := exitErr.ProcessState; ps != nil {
+			if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+				return 128 + int(ws.Signal())
+			}
 		}
 	}
 	return 1
